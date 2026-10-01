@@ -8,7 +8,10 @@ import { ApiError } from "../api/client";
 import { Atmosphere } from "../components/atmosphere";
 import { ToastProvider } from "../components/toast";
 import { useLocale } from "../i18n";
+import { initTheme } from "../lib/theme";
 import { createAppRouter } from "./router";
+
+initTheme();
 
 const queryClient = new QueryClient({
   defaultOptions: {

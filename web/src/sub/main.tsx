@@ -8,7 +8,10 @@ import { LangSwitch } from "../components/lang";
 import { Button, Pill, QR, Ring, Skeleton } from "../components/ui";
 import { t, useLocale } from "../i18n";
 import { ago, appName, bytes, dateLong, dateShort, days, daysUntil, time } from "../lib/format";
+import { initTheme } from "../lib/theme";
 import { loadShop, Shop, type ShopData } from "./shop";
+
+initTheme();
 
 type Info = {
   name: string;

@@ -6,6 +6,7 @@ import { api, unwrap } from "../api/client";
 import { meQuery, useNode, useOverview, useUpdates } from "../api/hooks";
 import { Logo } from "../components/atmosphere";
 import { LangSwitch } from "../components/lang";
+import { ThemeToggle } from "../components/theme-toggle";
 import { Avatar, Bar, Pill } from "../components/ui";
 import { t } from "../i18n";
 import { num, uptime } from "../lib/format";
@@ -44,6 +45,7 @@ export function Shell() {
           <div className="side-foot">
             <UpdateChip />
             <NodeCard />
+            <ThemeToggle />
             <AdminRow />
             <LangSwitch className="self-start" />
           </div>
