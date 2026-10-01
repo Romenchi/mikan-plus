@@ -1,7 +1,7 @@
 #!/bin/sh
 # mikan: one-line install.
 #
-#   curl -fsSL https://github.com/Miroshka000/mikan/releases/latest/download/install.sh | sudo bash
+#   curl -fsSL https://github.com/Romenchi/mikan-plus/releases/latest/download/install.sh | sudo bash
 #
 # Downloads the installer for this server's architecture from the latest release, checks
 # it against the release manifest and starts it with the arguments given after "-s --":
@@ -9,7 +9,7 @@
 # checks the manifest's signature itself before it pulls anything else.
 set -eu
 
-REPO="Miroshka000/mikan"
+REPO="Romenchi/mikan-plus"
 BASE="https://github.com/$REPO/releases/latest/download"
 
 fail() {

@@ -17,13 +17,11 @@ import (
 	"time"
 )
 
-// PublicKey is the public half of the release signing key (raw Ed25519, base64). The
-// private half lives only in the RELEASE_SIGNING_KEY secret of the release workflow and
-// with the maintainer.
-const PublicKey = "Z3wSIPBSaJxh5CsGO8eINI0aM0kyrQ46EcJSNeH85W8="
+// PublicKey is the public half of the release signing key (raw Ed25519, base64).
+const PublicKey = "JCEgib4sIDFPGePPBk4B+zmKwlnpLNoZ8i7vmrJipPo="
 
 // Repo is where releases are published.
-const Repo = "Miroshka000/mikan"
+const Repo = "Romenchi/mikan-plus"
 
 // InstallCommand installs mikan from the latest release; run on the server.
 const InstallCommand = "curl -fsSL https://github.com/" + Repo + "/releases/latest/download/install.sh | sudo bash"

@@ -11,9 +11,9 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use serde::Deserialize;
 
 /// The public half of the release signing key, the same as internal/release.PublicKey.
-pub const PUBLIC_KEY: &str = "Z3wSIPBSaJxh5CsGO8eINI0aM0kyrQ46EcJSNeH85W8=";
+pub const PUBLIC_KEY: &str = "JCEgib4sIDFPGePPBk4B+zmKwlnpLNoZ8i7vmrJipPo=";
 
-pub const REPO: &str = "Miroshka000/mikan";
+pub const REPO: &str = "Romenchi/mikan-plus";
 
 /// Installs a node of an existing panel on a fresh server (internal/release.JoinCommand).
 pub fn join_command(key: &str) -> String {

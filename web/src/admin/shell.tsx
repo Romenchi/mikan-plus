@@ -30,7 +30,7 @@ export function Shell() {
         <aside className="sidebar glass" aria-label={t("shell.sidebar")}>
           <div className="brand">
             <Logo />
-            <span className="brand-name">mikan</span>
+            <span className="brand-name">mikan+</span>
           </div>
           <nav className="nav" aria-label={t("shell.sections")}>
             {NAV.map((n) => (
