@@ -2,7 +2,6 @@ package node
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 
 	"github.com/metacubex/mihomo/listener"
