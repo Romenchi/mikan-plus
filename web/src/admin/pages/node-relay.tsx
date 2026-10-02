@@ -5,7 +5,6 @@ import { errorText } from "../../api/client";
 import { Drawer } from "../../components/overlay";
 import { useToast } from "../../components/toast";
 import { Button, ErrorState, Field, Skeleton, Switch } from "../../components/ui";
-import { t } from "../../i18n";
 
 export interface RelayData {
   configured: boolean;
@@ -171,7 +170,7 @@ export function RelayDrawer({ node, onClose }: { node: { id: number; name: strin
                   value={linkInput}
                   onChange={(e) => setLinkInput(e.target.value)}
                 />
-                <Button variant="secondary" onClick={parseLink}>
+                <Button variant="glass" onClick={parseLink}>
                   <Zap size={15} />
                   <span>Вставить</span>
                 </Button>
