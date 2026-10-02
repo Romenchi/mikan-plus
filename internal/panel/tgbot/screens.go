@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -36,6 +37,8 @@ func (b *Bot) screen(ctx context.Context, cfg Config, chat int64, data, notice s
 			id, _, _ := strings.Cut(arg, ":")
 			return b.shopInvoice(ctx, w, chat, 0, arg, []Button{{Text: w.back, CallbackData: "tn:" + id}})
 		}
+	if cmd == "ref" {
+		return b.referralScreen(ctx, cfg, w, chat, notice)
 	}
 	if !ok {
 		return b.welcome(ctx, cfg, w, notice)
@@ -153,6 +156,8 @@ func (b *Bot) menu(ctx context.Context, cfg Config, w *words, subs int) *Keyboar
 			btn = Button{Text: mb.Label, CallbackData: "c"}
 		case "renew":
 			btn = Button{Text: mb.Label, CallbackData: "r"}
+		case "ref":
+			btn = Button{Text: mb.Label, CallbackData: "ref"}
 		case "support":
 			sup := b.supportURL(ctx)
 			if sup == "" {
@@ -404,4 +409,47 @@ func (b *Bot) poolLines(ctx context.Context, w *words, userID int64) []string {
 		out = append(out, line)
 	}
 	return out
+}
+
+func (b *Bot) referralScreen(ctx context.Context, cfg Config, w *words, chat int64, notice string) (string, *Keyboard) {
+	st := b.Status()
+	botUsername := st.Bot.Username
+	refURL := fmt.Sprintf("https://t.me/%s?start=ref_%d", botUsername, chat)
+	count, _ := b.d.Store.Q.CountReferrals(ctx, chat)
+	days, _ := b.d.Store.Q.SumReferralDays(ctx, chat)
+
+	var sb strings.Builder
+	if notice != "" {
+		sb.WriteString(html.EscapeString(notice) + "\n\n")
+	}
+	if cfg.Lang == "en" {
+		sb.WriteString("🤝 <b>Referral Program</b>\n\n")
+		sb.WriteString("Invite friends and earn bonus days for your subscription!\n\n")
+		sb.WriteString("🔗 <b>Your invite link:</b>\n")
+		sb.WriteString("<code>" + refURL + "</code>\n\n")
+		sb.WriteString("📊 <b>Your stats:</b>\n")
+		sb.WriteString(fmt.Sprintf("• Friends invited: <b>%d</b>\n", count))
+		sb.WriteString(fmt.Sprintf("• Bonus days earned: <b>+%d d.</b>", days))
+	} else {
+		sb.WriteString("🤝 <b>Реферальная программа</b>\n\n")
+		sb.WriteString("Приглашайте друзей и получайте бонусные дни к вашей подписке!\n\n")
+		sb.WriteString("🔗 <b>Ваша ссылка для приглашения:</b>\n")
+		sb.WriteString("<code>" + refURL + "</code>\n\n")
+		sb.WriteString("📊 <b>Ваша статистика:</b>\n")
+		sb.WriteString(fmt.Sprintf("• Приглашено друзей: <b>%d</b>\n", count))
+		sb.WriteString(fmt.Sprintf("• Получено бонусов: <b>+%d дн.</b>", days))
+	}
+
+	shareText := "Попробуй быстрый и надежный VPN HeyCat с защитой от блокировок!"
+	if cfg.Lang == "en" {
+		shareText = "Try HeyCat VPN - fast and secure VPN with anti-censorship!"
+	}
+	shareURL := fmt.Sprintf("https://t.me/share/url?url=%s&text=%s", url.QueryEscape(refURL), url.QueryEscape(shareText))
+
+	back := []Button{{Text: w.back, CallbackData: "m"}}
+	rows := [][]Button{
+		{{Text: "📤 " + pick(cfg.Lang == "en", "Share invite link", "Поделиться ссылкой"), URL: shareURL}},
+		back,
+	}
+	return sb.String(), &Keyboard{rows}
 }

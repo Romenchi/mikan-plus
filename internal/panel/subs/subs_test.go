@@ -217,7 +217,8 @@ func TestRouting(t *testing.T) {
 	}
 
 	ru := render(Groups{}, RoutingRUDirect)
-	want := []string{"IP-CIDR,203.0.113.7/32,DIRECT,no-resolve", "GEOIP,LAN,DIRECT,no-resolve", "GEOSITE,category-ru,DIRECT", "GEOIP,ru,DIRECT", "MATCH,VPN"}
+	want := append([]string{"IP-CIDR,203.0.113.7/32,DIRECT,no-resolve", "GEOIP,LAN,DIRECT,no-resolve"}, ruDirectRules...)
+	want = append(want, "MATCH,VPN")
 	if strings.Join(ru.Rules, "|") != strings.Join(want, "|") {
 		t.Fatalf("ru_direct rules: %v", ru.Rules)
 	}

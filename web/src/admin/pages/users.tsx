@@ -1,6 +1,6 @@
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import clsx from "clsx";
-import { CalendarPlus, ChevronRight, Plus, Power, RotateCcw, Search, Trash2, X } from "lucide-react";
+import { CalendarPlus, ChevronRight, Download, Plus, Power, RotateCcw, Search, Trash2, Upload, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { errorText, type Tariff, type User } from "../../api/client";
@@ -15,6 +15,8 @@ import { useMediaQuery } from "../../lib/media";
 import { USER_STATES } from "../search";
 import { CreateUserDrawer } from "./user-create";
 import { UserDrawer } from "./user-drawer";
+import { ExportUsersDrawer } from "./user-export";
+import { ImportUsersDrawer } from "./user-import";
 
 export function UsersPage() {
   const search = useSearch({ from: "/_app/users" });
@@ -26,6 +28,8 @@ export function UsersPage() {
   const users = useUsers({ state: search.state, q: search.q });
   const tariffs = useTariffs();
   const [selected, setSelected] = useState<ReadonlySet<number>>(new Set());
+  const [exportOpen, setExportOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const narrow = useMediaQuery("(max-width: 767px)");
 
   useEffect(() => {
@@ -69,10 +73,20 @@ export function UsersPage() {
         title={t("nav.users")}
         sub={counts ? t("users.subtitle", { n: counts.all, active: num(counts.active) }) : "…"}
         actions={
-          <Button variant="primary" onClick={() => void navigate({ search: (s) => ({ ...s, create: true, user: undefined }) })}>
-            <Plus size={18} aria-hidden />
-            <span className="max-[760px]:hidden">{t("dashboard.newUser")}</span>
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="glass" onClick={() => setImportOpen(true)} title="Импорт пользователей из CSV или JSON">
+              <Upload size={16} aria-hidden />
+              <span className="max-sm:hidden">Импорт</span>
+            </Button>
+            <Button variant="glass" onClick={() => setExportOpen(true)} title="Экспорт пользователей в CSV, JSON или TXT">
+              <Download size={16} aria-hidden />
+              <span className="max-sm:hidden">Экспорт</span>
+            </Button>
+            <Button variant="primary" onClick={() => void navigate({ search: (s) => ({ ...s, create: true, user: undefined }) })}>
+              <Plus size={18} aria-hidden />
+              <span className="max-[760px]:hidden">{t("dashboard.newUser")}</span>
+            </Button>
+          </div>
         }
       />
       <div className="reveal flex flex-col items-stretch justify-between gap-3 lg:flex-row lg:items-center">
@@ -162,13 +176,25 @@ export function UsersPage() {
         </QueryBoundary>
       </section>
 
-      <BulkBar chosen={chosen} clear={clear} />
+      <BulkBar chosen={chosen} clear={clear} onExport={() => setExportOpen(true)} />
       <CreateUserDrawer
         open={!!search.create}
         onOpenChange={(v) => void navigate({ search: (s) => ({ ...s, create: v ? true : undefined }) })}
         onCreated={(id) => void navigate({ search: (s) => ({ ...s, create: undefined, user: id }) })}
       />
       <UserDrawer id={search.user} onClose={() => openUser(undefined)} />
+      <ExportUsersDrawer
+        open={exportOpen}
+        onOpenChange={setExportOpen}
+        allUsers={items}
+        selectedUsers={chosen}
+        tariffs={tariffById}
+      />
+      <ImportUsersDrawer
+        open={importOpen}
+        onOpenChange={setImportOpen}
+        tariffs={tariffs.data ?? []}
+      />
     </>
   );
 }
@@ -326,7 +352,7 @@ type BulkAction = "extend" | "reset" | "disable" | "enable" | "delete";
 /** How many names the delete confirmation lists before it says "…". */
 const NAMES_SHOWN = 5;
 
-function BulkBar({ chosen, clear }: { chosen: User[]; clear: () => void }) {
+function BulkBar({ chosen, clear, onExport }: { chosen: User[]; clear: () => void; onExport: () => void }) {
   const toast = useToast();
   const bulk = useUserMutation(userActions.bulk);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -381,6 +407,10 @@ function BulkBar({ chosen, clear }: { chosen: User[]; clear: () => void }) {
             </Button>
             <Button size="sm" variant="danger" disabled={busy} onClick={() => setConfirmDelete(true)} aria-label={t("users.deleteSelected")}>
               <Trash2 size={16} aria-hidden />
+            </Button>
+            <Button size="sm" disabled={busy} onClick={onExport} title="Экспортировать выбранных">
+              <Download size={16} aria-hidden />
+              <span className="max-sm:hidden">Экспорт</span>
             </Button>
             <button type="button" className="icon-btn" aria-label={t("users.clearSelection")} disabled={busy} onClick={clear}>
               <X size={16} />

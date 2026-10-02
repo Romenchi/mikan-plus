@@ -269,5 +269,30 @@ func (b *Bot) Paid(ctx context.Context, p db.Payment, u db.User, created bool) {
 		_, err := c.Send(ctx, chat, text, nil, false)
 		return err
 	}, nil)
+	b.checkReferralPayment(ctx, out, chat)
 	b.freshMenu(out, chat, "")
+}
+
+func (b *Bot) checkReferralPayment(ctx context.Context, out *Outbox, refereeTgID int64) {
+	cfg := b.Config(ctx)
+	if !cfg.Referrals.Enabled || cfg.Referrals.Trigger != "on_payment" {
+		return
+	}
+	ref, err := b.d.Store.Q.GetReferralByReferee(ctx, refereeTgID)
+	if err != nil || ref.BonusApplied != 0 {
+		return
+	}
+	days := int64(cfg.Referrals.ReferrerDays)
+	if days <= 0 {
+		days = 7
+	}
+	affected, err := b.d.Store.Q.ApplyReferralReward(ctx, db.ApplyReferralRewardParams{
+		RewardDays:  days,
+		AppliedAt:   b.d.Now().Unix(),
+		RefereeTgID: refereeTgID,
+	})
+	if err != nil || affected == 0 {
+		return
+	}
+	b.applyReferrerReward(ctx, out, ref.ReferrerTgID, days)
 }

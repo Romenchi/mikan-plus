@@ -58,6 +58,7 @@ type Deps struct {
 	Billing *billing.Service
 	// Tunnel reaches addr through node id, for RouteNode; nil: the panel has no nodes.
 	Tunnel func(ctx context.Context, nodeID int64, addr string) (net.Conn, error)
+	Users  *domain.Users
 
 	// stars takes a successful Stars payment instead of Billing; tests only.
 	stars func(ctx context.Context, tgID int64, payload, chargeID, currency string, amount int64) error
@@ -430,11 +431,66 @@ func (b *Bot) onMessage(ctx context.Context, out *Outbox, m *Message) {
 	text := strings.TrimSpace(m.Text)
 	switch {
 	case strings.HasPrefix(text, "/start "):
-		notice = b.linkByCode(ctx, out, w, chat, who(m.From), strings.TrimSpace(strings.TrimPrefix(text, "/start ")))
+		param := strings.TrimSpace(strings.TrimPrefix(text, "/start "))
+		if strings.HasPrefix(param, "ref_") {
+			notice = b.onReferralStart(ctx, out, w, chat, strings.TrimPrefix(param, "ref_"))
+		} else {
+			notice = b.linkByCode(ctx, out, w, chat, who(m.From), param)
+		}
 	case subLink.MatchString(text):
 		notice = b.linkByToken(ctx, out, w, chat, who(m.From), subLink.FindStringSubmatch(text)[1])
 	}
 	b.freshMenu(out, chat, notice)
+}
+
+func (b *Bot) onReferralStart(ctx context.Context, out *Outbox, w *words, chat int64, refStr string) string {
+	referrerID, err := strconv.ParseInt(refStr, 10, 64)
+	if err != nil || referrerID == 0 || referrerID == chat {
+		return ""
+	}
+	cfg := b.Config(ctx)
+	if _, err := b.d.Store.Q.GetReferralByReferee(ctx, chat); err == nil {
+		return ""
+	}
+	now := b.d.Now().Unix()
+	_ = b.d.Store.Q.RecordReferral(ctx, db.RecordReferralParams{
+		ReferrerTgID: referrerID,
+		RefereeTgID:  chat,
+		CreatedAt:    now,
+	})
+	if cfg.Referrals.Enabled && cfg.Referrals.Trigger == "on_start" {
+		days := int64(cfg.Referrals.ReferrerDays)
+		if days <= 0 {
+			days = 7
+		}
+		if affected, err := b.d.Store.Q.ApplyReferralReward(ctx, db.ApplyReferralRewardParams{
+			RewardDays:  days,
+			AppliedAt:   now,
+			RefereeTgID: chat,
+		}); err == nil && affected > 0 {
+			b.applyReferrerReward(ctx, out, referrerID, days)
+		}
+	}
+	if cfg.Lang == "en" {
+		return "👋 Welcome! You joined via a friend's invitation."
+	}
+	return "👋 Добро пожаловать! Вы присоединились по приглашению друга."
+}
+
+func (b *Bot) applyReferrerReward(ctx context.Context, out *Outbox, referrerID int64, days int64) {
+	if b.d.Users != nil {
+		list, sub, ok := b.subs(ctx, referrerID)
+		if ok {
+			_, _ = b.d.Users.Extend(ctx, sub.ID, days)
+		} else if len(list) > 0 {
+			_, _ = b.d.Users.Extend(ctx, list[0].ID, days)
+		}
+	}
+	msg := fmt.Sprintf("🎉 <b>Реферальный бонус!</b>\n\nВаш друг присоединился по вашей ссылке! Вам начислено <b>+%d дн.</b> к подписке HeyCat.", days)
+	out.Notice(referrerID, func(ctx context.Context, c *Client) error {
+		_, err := c.Send(ctx, referrerID, msg, nil, false)
+		return err
+	}, nil)
 }
 
 // freshMenu sends the main menu as a new message and removes the previous one, so the

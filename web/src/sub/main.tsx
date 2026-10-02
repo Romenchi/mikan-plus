@@ -359,7 +359,11 @@ function SubPage() {
       {current.binding || current.devices?.length ? <Devices info={current} subURL={subURL} reload={() => loadInfo(subURL).catch(() => undefined)} /> : null}
 
       <section className="glass rounded-3xl p-4">
-        <h2 className="mb-3 text-[15px] font-semibold">{t("sub.connect")}</h2>
+        <h2 className="mb-2 text-[15px] font-semibold">{t("sub.connect")}</h2>
+        <div className="mb-3 flex items-center gap-2.5 rounded-2xl border border-[var(--hairline)] bg-[var(--hover)] px-3.5 py-2.5 text-xs text-[var(--ink-700)]">
+          <span className="text-sm font-bold text-[var(--mikan-600)]" aria-hidden>⚡</span>
+          <span className="leading-snug"><b>Smart Routing:</b> сайты РФ, банки и Госуслуги открываются напрямую без задержек, а заблокированные сервисы — через HeyCat.</span>
+        </div>
         <div className="mb-3 flex gap-1 rounded-[14px] bg-[var(--hover)] p-1" role="group" aria-label={t("sub.platform")}>
           {(
             [

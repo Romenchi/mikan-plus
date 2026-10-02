@@ -232,6 +232,39 @@ func URIs(p Profile) (string, error) {
 	return strings.Join(lines, "\n"), nil
 }
 
+var ruDirectRules = []string{
+	"GEOSITE,category-ru,DIRECT",
+	"GEOIP,ru,DIRECT",
+	"DOMAIN-SUFFIX,ru,DIRECT",
+	"DOMAIN-SUFFIX,xn--p1ai,DIRECT",
+	"DOMAIN-SUFFIX,su,DIRECT",
+	"DOMAIN-SUFFIX,sberbank.ru,DIRECT",
+	"DOMAIN-SUFFIX,sberbank.com,DIRECT",
+	"DOMAIN-SUFFIX,sber.ru,DIRECT",
+	"DOMAIN-SUFFIX,tbank.ru,DIRECT",
+	"DOMAIN-SUFFIX,tinkoff.ru,DIRECT",
+	"DOMAIN-SUFFIX,alfabank.ru,DIRECT",
+	"DOMAIN-SUFFIX,vtb.ru,DIRECT",
+	"DOMAIN-SUFFIX,gosuslugi.ru,DIRECT",
+	"DOMAIN-SUFFIX,mos.ru,DIRECT",
+	"DOMAIN-SUFFIX,nalog.gov.ru,DIRECT",
+	"DOMAIN-SUFFIX,nalog.ru,DIRECT",
+	"DOMAIN-SUFFIX,yandex.ru,DIRECT",
+	"DOMAIN-SUFFIX,yandex.net,DIRECT",
+	"DOMAIN-SUFFIX,ya.ru,DIRECT",
+	"DOMAIN-SUFFIX,kinopoisk.ru,DIRECT",
+	"DOMAIN-SUFFIX,vk.com,DIRECT",
+	"DOMAIN-SUFFIX,vkvideo.ru,DIRECT",
+	"DOMAIN-SUFFIX,ok.ru,DIRECT",
+	"DOMAIN-SUFFIX,dzen.ru,DIRECT",
+	"DOMAIN-SUFFIX,mail.ru,DIRECT",
+	"DOMAIN-SUFFIX,avito.ru,DIRECT",
+	"DOMAIN-SUFFIX,ozon.ru,DIRECT",
+	"DOMAIN-SUFFIX,wildberries.ru,DIRECT",
+	"DOMAIN-SUFFIX,rutube.ru,DIRECT",
+	"DOMAIN-SUFFIX,2gis.ru,DIRECT",
+}
+
 // Mihomo renders a complete client profile. mihomo's parser accepts JSON as YAML.
 func Mihomo(p Profile, g Groups, r Routing) ([]byte, error) {
 	ps, err := build(p)
@@ -278,8 +311,9 @@ func Mihomo(p Profile, g Groups, r Routing) ([]byte, error) {
 		"proxies":      proxies,
 		"proxy-groups": groups,
 	}
+
 	if r == RoutingRUDirect {
-		rules = append(rules, "GEOSITE,category-ru,DIRECT", "GEOIP,ru,DIRECT")
+		rules = append(rules, ruDirectRules...)
 		cfg["geodata-mode"], cfg["geox-url"] = false, geoxURL
 		// GEOIP,ru makes the app resolve every domain itself. DoH straight from Russia
 		// stalls under TSPU throttling, so it goes through the tunnel (the alias group has
@@ -287,7 +321,7 @@ func Mihomo(p Profile, g Groups, r Routing) ([]byte, error) {
 		// Russian domains resolve with Yandex DNS directly and keep working without the VPN.
 		dns["nameserver"] = []string{"https://1.1.1.1/dns-query#" + AliasGroup, "https://8.8.8.8/dns-query#" + AliasGroup}
 		dns["proxy-server-nameserver"] = []string{"https://1.1.1.1/dns-query", "https://dns.google/dns-query"}
-		dns["nameserver-policy"] = map[string]any{"geosite:category-ru": []string{"77.88.8.8", "77.88.8.1"}}
+		dns["nameserver-policy"] = map[string]any{"geosite:category-ru,+.ru,+.xn--p1ai,+.su,+.vk.com,+.yandex.net,+.sberbank.com": []string{"77.88.8.8", "77.88.8.1"}}
 	}
 	cfg["rules"] = append(rules, "MATCH,"+g.Main)
 	return json.MarshalIndent(cfg, "", "  ")

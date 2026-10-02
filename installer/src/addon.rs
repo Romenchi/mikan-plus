@@ -22,6 +22,18 @@ use crate::panelfs::Dir;
 use crate::{docker, net, panelfs, release, setup};
 
 pub const CATALOG_URL: &str = "https://github.com/getmikan/marketplace/releases/latest/download/index.json";
+pub const MARKETPLACE_KEY: &str = "Z3wSIPBSaJxh5CsGO8eINI0aM0kyrQ46EcJSNeH85W8=";
+
+pub fn marketplace_key() -> Result<VerifyingKey> {
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(MARKETPLACE_KEY)
+        .context("marketplace public key is not base64")?;
+    let bytes: [u8; 32] = raw
+        .as_slice()
+        .try_into()
+        .context("marketplace public key is not 32 bytes")?;
+    VerifyingKey::from_bytes(&bytes).context("marketplace public key is not an Ed25519 point")
+}
 /// The adapter protocol the panel and this command speak.
 const PROTOCOL: u32 = 1;
 /// Where the panel and this command meet, below DIR; the panel sees it as
@@ -132,7 +144,7 @@ pub fn parse_catalog(data: &[u8], sig: &str, key: &VerifyingKey, panel: &str) ->
 pub fn catalog(panel: &str) -> Result<Vec<Entry>> {
     let data = net::get(CATALOG_URL, 1 << 20).context("download the marketplace catalog")?;
     let sig = net::get(&format!("{CATALOG_URL}.sig"), 4096).context("download the catalog's signature")?;
-    let entries = parse_catalog(&data, &String::from_utf8_lossy(&sig), &release::key()?, panel)?;
+    let entries = parse_catalog(&data, &String::from_utf8_lossy(&sig), &marketplace_key()?, panel)?;
     not_older(Path::new(CATALOG_SEEN), &data)?;
     Ok(entries)
 }

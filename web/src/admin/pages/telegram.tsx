@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Link, useBlocker, useNavigate, useSearch } from "@tanstack/react-router";
-import { ArrowDown, ArrowUp, Bell, Bot, Globe, LayoutList, Link2, Megaphone, Network, Plus, PlugZap, Send, Shield, Trash2, TriangleAlert } from "lucide-react";
+import { ArrowDown, ArrowUp, Bell, Bot, Gift, Globe, LayoutList, Link2, Megaphone, Network, Plus, PlugZap, Send, Shield, Trash2, TriangleAlert } from "lucide-react";
 import { useMemo, useState, type FormEvent } from "react";
 import { api, ApiError, errorText, unwrap, type Schemas } from "../../api/client";
 import { qk, useNodes, useSettings } from "../../api/hooks";
@@ -120,7 +120,16 @@ function TelegramBody({ v }: { v: View }) {
             right={<Preview draft={draft} v={v} />}
           />
         ) : tab === "notify" ? (
-          <Columns wide="left" left={<OptionsCard draft={draft} setDraft={setDraft} v={v} />} right={<Preview draft={draft} v={v} />} />
+          <Columns
+            wide="left"
+            left={
+              <>
+                <OptionsCard draft={draft} setDraft={setDraft} v={v} />
+                <ReferralCard draft={draft} setDraft={setDraft} />
+              </>
+            }
+            right={<Preview draft={draft} v={v} />}
+          />
         ) : (
           <div className="max-w-3xl">
             <BroadcastCard v={v} />
@@ -581,6 +590,98 @@ function OptionsCard({ draft, setDraft, v }: { draft: Config; setDraft: (c: Conf
         {row(t("telegram.quietNight"), t("telegram.quietNightSub"), draft.quiet_night, (on) => setDraft({ ...draft, quiet_night: on }))}
         {NOTICES.map((k) => row(t(`telegram.notice.${k}`), t("telegram.noticeSub"), draft.notify[k], (on) => setDraft({ ...draft, notify: { ...draft.notify, [k]: on } })))}
       </ul>
+    </section>
+  );
+}
+
+function ReferralCard({ draft, setDraft }: { draft: Config; setDraft: (c: Config) => void }) {
+  const ref = draft.referrals ?? {
+    enabled: false,
+    trigger: "on_payment",
+    referrer_days: 7,
+    referee_days: 3,
+  };
+
+  const updateRef = (patch: Partial<typeof ref>) => {
+    setDraft({
+      ...draft,
+      referrals: { ...ref, ...patch },
+    });
+  };
+
+  return (
+    <section {...rise(4)}>
+      <div className="card-head">
+        <div>
+          <h2 className="card-title">Реферальная программа</h2>
+          <div className="card-sub">Бонусные дни подписки за приглашение друзей</div>
+        </div>
+        <Switch
+          checked={ref.enabled}
+          label="Включить реферальную программу"
+          onChange={(on) => updateRef({ enabled: on })}
+        />
+      </div>
+
+      {ref.enabled ? (
+        <div className="mt-4 flex flex-col gap-4">
+          <Field
+            label="Когда начислять бонус"
+            hint="«После первой оплаты» безопаснее от накруток (рекомендуется)"
+          >
+            <Segmented
+              label="Условие начисления"
+              value={ref.trigger}
+              onChange={(val) => updateRef({ trigger: val as "on_payment" | "on_start" })}
+              options={[
+                { value: "on_payment", label: "После первой оплаты" },
+                { value: "on_start", label: "При первом переходе (/start)" },
+              ]}
+            />
+          </Field>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <Field
+              label="Бонус пригласившему (дней)"
+              hint="Добавится к подписке того, кто пригласил"
+            >
+              <input
+                type="number"
+                min={1}
+                max={365}
+                className="input"
+                value={ref.referrer_days}
+                onChange={(e) => updateRef({ referrer_days: Math.max(1, parseInt(e.target.value) || 1) })}
+              />
+            </Field>
+
+            <Field
+              label="Бонус приглашённому (дней)"
+              hint="Добавится к подписке нового пользователя"
+            >
+              <input
+                type="number"
+                min={0}
+                max={365}
+                className="input"
+                value={ref.referee_days}
+                onChange={(e) => updateRef({ referee_days: Math.max(0, parseInt(e.target.value) || 0) })}
+              />
+            </Field>
+          </div>
+
+          <div className="panel-soft p-3 text-xs text-[var(--ink-500)] flex items-start gap-2">
+            <Gift size={16} className="shrink-0 mt-0.5 text-[var(--accent)]" />
+            <div>
+              В боте активируется раздел <b>«Пригласить друга»</b> с персональной ссылкой (<code>t.me/bot?start=ref_ID</code>) и кнопкой быстрой отправки друзьям в Telegram.
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="mt-2 text-xs text-[var(--ink-400)]">
+          Программа выключена. Кнопка «Пригласить друга» скрыта в меню бота.
+        </div>
+      )}
     </section>
   );
 }

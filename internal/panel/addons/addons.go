@@ -35,6 +35,9 @@ import (
 // CatalogURL is where the signed catalog is published, next to its .sig.
 const CatalogURL = "https://github.com/getmikan/marketplace/releases/latest/download/index.json"
 
+// MarketplaceKey is the official public key that signs getmikan/marketplace releases.
+const MarketplaceKey = "Z3wSIPBSaJxh5CsGO8eINI0aM0kyrQ46EcJSNeH85W8="
+
 // Protocol is the adapter protocol this panel speaks.
 const Protocol = 1
 
@@ -182,7 +185,7 @@ func New(dataDir, catalogURL, panelVersion string, log *slog.Logger, now func() 
 	if catalogURL == "" {
 		catalogURL = CatalogURL
 	}
-	pub, _ := release.Key(release.PublicKey)
+	pub, _ := release.Key(MarketplaceKey)
 	m := &Manager{catalogURL: catalogURL, pub: pub, version: panelVersion, log: log, now: now,
 		hc: &http.Client{Timeout: 15 * time.Second}, adapters: &http.Client{Timeout: AdapterTimeout}, infos: map[string]cachedInfo{}}
 	if dataDir != "" {

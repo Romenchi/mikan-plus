@@ -17,14 +17,22 @@ type Config struct {
 	MiniApp   bool         `json:"mini_app" doc:"Кнопка Mini App со страницей подписки"`
 	CleanChat bool         `json:"clean_chat" doc:"Удалять сообщения пользователя, чтобы в чате было одно меню"`
 	// QuietNight: the automatic notices from 22:00 to 9:00 Moscow time come without a sound.
-	QuietNight bool `json:"quiet_night" doc:"Уведомления с 22:00 до 9:00 МСК приходят без звука"`
+	QuietNight bool           `json:"quiet_night" doc:"Уведомления с 22:00 до 9:00 МСК приходят без звука"`
+	Referrals  ReferralConfig `json:"referrals" doc:"Настройки реферальной программы"`
+}
+
+type ReferralConfig struct {
+	Enabled      bool   `json:"enabled" doc:"Включить реферальную программу"`
+	Trigger      string `json:"trigger" enum:"on_payment,on_start" doc:"Когда начислять: on_payment или on_start"`
+	ReferrerDays int    `json:"referrer_days" doc:"Дней бонуса пригласившему"`
+	RefereeDays  int    `json:"referee_days" doc:"Дней бонуса приглашённому другу"`
 }
 
 // MenuButton of the main menu. Built-in actions open screens; "url" opens a link, "page"
 // a text of the admin's.
 type MenuButton struct {
 	ID     string `json:"id" doc:"Постоянный id кнопки"`
-	Action string `json:"action" enum:"sub,devices,connect,renew,support,app,url,page"`
+	Action string `json:"action" enum:"sub,devices,connect,renew,support,app,url,page,ref"`
 	Label  string `json:"label"`
 	On     bool   `json:"on"`
 	Row    bool   `json:"row" doc:"В одном ряду с предыдущей"`
@@ -53,7 +61,7 @@ type Notify struct {
 }
 
 // Built-in actions, each at most once in the menu.
-var builtins = []string{"sub", "devices", "connect", "renew", "support", "app"}
+var builtins = []string{"sub", "devices", "connect", "renew", "support", "app", "ref"}
 
 // Default is the menu of a fresh bot in lang, "en" or else Russian.
 func Default(lang string) Config {
@@ -73,6 +81,7 @@ func Default(lang string) Config {
 			{ID: "devices", Action: "devices", Label: l("📱 Устройства", "📱 Devices"), On: true, Row: true},
 			{ID: "connect", Action: "connect", Label: l("🔌 Подключить устройство", "🔌 Connect a device"), On: true},
 			{ID: "renew", Action: "renew", Label: l("💳 Продлить", "💳 Renew"), On: true},
+			{ID: "ref", Action: "ref", Label: l("🤝 Пригласить друга", "🤝 Invite a friend"), On: false},
 			{ID: "support", Action: "support", Label: l("💬 Поддержка", "💬 Support"), On: true, Row: true},
 			{ID: "app", Action: "app", Label: l("🌐 Открыть страницу подписки", "🌐 Open the subscription page"), On: true},
 		},
@@ -80,6 +89,12 @@ func Default(lang string) Config {
 		MiniApp:    true,
 		CleanChat:  true,
 		QuietNight: true,
+		Referrals: ReferralConfig{
+			Enabled:      false,
+			Trigger:      "on_payment",
+			ReferrerDays: 7,
+			RefereeDays:  3,
+		},
 	}
 }
 

@@ -1408,6 +1408,13 @@ export interface components {
             notify: components["schemas"]["Notify"];
             /** @description Уведомления с 22:00 до 9:00 МСК приходят без звука */
             quiet_night: boolean;
+            /** @description Реферальная программа */
+            referrals?: {
+                enabled: boolean;
+                trigger: "on_payment" | "on_start";
+                referrer_days: number;
+                referee_days: number;
+            };
             texts: components["schemas"]["Texts"];
         };
         CreateAPIKeyInputBody: {
