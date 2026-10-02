@@ -257,7 +257,10 @@ func (h *handlers) putRelay(ctx context.Context, input *relayInput) (*relayOutpu
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
 
-	h.d.Nodes.MarkDirty()
+	if h.d.Nodes != nil {
+		h.d.Nodes.NodesChanged()
+	}
+	h.d.Changes.SlotsChanged()
 
 	var inNames []string
 	_ = json.Unmarshal([]byte(inboundsJSON), &inNames)
@@ -289,6 +292,9 @@ func (h *handlers) deleteRelay(ctx context.Context, input *struct {
 	if err := h.d.Store.Q.DeleteNodeRelay(ctx, input.ID); err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
-	h.d.Nodes.MarkDirty()
+	if h.d.Nodes != nil {
+		h.d.Nodes.NodesChanged()
+	}
+	h.d.Changes.SlotsChanged()
 	return nil, nil
 }
