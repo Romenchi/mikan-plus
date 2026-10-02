@@ -30,6 +30,8 @@ type DesiredState struct {
 	SelfStealPort int `json:"self_steal_port,omitempty"`
 	// Warp is Cloudflare WARP as an outbound; nil: everything leaves directly.
 	Warp *Warp `json:"warp,omitempty"`
+	// Relay is an upstream proxy (e.g. VLESS Reality to Germany); nil: direct exit.
+	Relay *Relay `json:"relay,omitempty"`
 }
 
 type Inbound struct {
@@ -236,4 +238,21 @@ type WarpStatus struct {
 	Colo       string    `json:"colo,omitempty"` // Cloudflare's data center
 	Error      string    `json:"error,omitempty"`
 	CheckedAt  time.Time `json:"checked_at"`
+}
+
+// Relay routes node traffic through an upstream proxy (e.g. VLESS Reality to Germany).
+type Relay struct {
+	Enabled     bool     `json:"enabled"`
+	Protocol    string   `json:"protocol"` // "vless", "socks5", "shadowsocks"
+	Server      string   `json:"server"`
+	Port        int      `json:"port"`
+	UUID        string   `json:"uuid,omitempty"`
+	Flow        string   `json:"flow,omitempty"`
+	TLS         bool     `json:"tls,omitempty"`
+	SNI         string   `json:"sni,omitempty"`
+	PublicKey   string   `json:"public_key,omitempty"`
+	ShortID     string   `json:"short_id,omitempty"`
+	SpiderX     string   `json:"spider_x,omitempty"`
+	Fingerprint string   `json:"fingerprint,omitempty"`
+	Inbounds    []string `json:"inbounds,omitempty"`
 }

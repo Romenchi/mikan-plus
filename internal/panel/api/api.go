@@ -169,6 +169,7 @@ func New(d Deps) (http.Handler, huma.API, error) {
 	h.registerAPIKeys()
 	h.registerPayments()
 	h.registerWarp()
+	h.registerRelay()
 	return noStore(mux), api, nil
 }
 

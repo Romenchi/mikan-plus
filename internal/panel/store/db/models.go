@@ -135,6 +135,25 @@ type NodeWarp struct {
 	UpdatedAt     int64
 }
 
+type NodeRelay struct {
+	NodeID      int64
+	Enabled     int64
+	Protocol    string
+	Server      string
+	Port        int64
+	Uuid        string
+	Flow        string
+	Tls         int64
+	Sni         string
+	PublicKey   string
+	ShortID     string
+	SpiderX     string
+	Fingerprint string
+	Inbounds    string
+	CreatedAt   int64
+	UpdatedAt   int64
+}
+
 type Payment struct {
 	ID         int64
 	Provider   string

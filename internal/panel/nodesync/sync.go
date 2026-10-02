@@ -134,6 +134,9 @@ func (s *Syncer) desired(ctx context.Context) (nodeapi.DesiredState, error) {
 	if st.Warp, err = s.warp(ctx, n, inbounds); err != nil {
 		return st, err
 	}
+	if st.Relay, err = s.relay(ctx, n, inbounds); err != nil {
+		return st, err
+	}
 	for _, in := range inbounds {
 		// A disabled node keeps running but serves nothing.
 		if in.NodeID != s.id || in.Enabled == 0 || n.Enabled == 0 {
@@ -413,7 +416,8 @@ func stateKey(st nodeapi.DesiredState) string {
 		T *nodeapi.TLSFiles
 		P int
 		W *nodeapi.Warp
-	}{st.Inbounds, st.Slots, st.TLS, st.SelfStealPort, st.Warp})
+		R *nodeapi.Relay
+	}{st.Inbounds, st.Slots, st.TLS, st.SelfStealPort, st.Warp, st.Relay})
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
 }
@@ -454,6 +458,36 @@ func (s *Syncer) warp(ctx context.Context, n db.Node, inbounds []db.Inbound) (*n
 		}
 	}
 	return out, nil
+}
+
+// relay is the node's upstream relay outbound (e.g. VLESS Reality to Germany), nil when disabled.
+func (s *Syncer) relay(ctx context.Context, n db.Node, inbounds []db.Inbound) (*nodeapi.Relay, error) {
+	r, err := s.m.st.Q.GetNodeRelay(ctx, n.ID)
+	if errors.Is(err, sql.ErrNoRows) || err == nil && r.Enabled == 0 {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var inNames []string
+	if r.Inbounds != "" {
+		_ = json.Unmarshal([]byte(r.Inbounds), &inNames)
+	}
+	return &nodeapi.Relay{
+		Enabled:     r.Enabled != 0,
+		Protocol:    r.Protocol,
+		Server:      r.Server,
+		Port:        int(r.Port),
+		UUID:        r.Uuid,
+		Flow:        r.Flow,
+		TLS:         r.Tls != 0,
+		SNI:         r.Sni,
+		PublicKey:   r.PublicKey,
+		ShortID:     r.ShortID,
+		SpiderX:     r.SpiderX,
+		Fingerprint: r.Fingerprint,
+		Inbounds:    inNames,
+	}, nil
 }
 
 // Warp asks the node how it reaches the internet through WARP.
