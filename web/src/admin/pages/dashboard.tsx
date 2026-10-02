@@ -1,11 +1,12 @@
 import { Link } from "@tanstack/react-router";
 import { Plus, ShieldCheck } from "lucide-react";
 import { useMemo, useState } from "react";
-import type { User } from "../../api/client";
+import { errorText, type Overview, type User } from "../../api/client";
 import { onePeriod, useInbounds, useNode, useOverview, userActions, useServerTraffic, useUserMutation, useUsers } from "../../api/hooks";
 import { buckets, TrafficChart, type Range } from "../../components/chart";
+import { QueryBoundary, StaleNotice } from "../../components/query";
 import { useToast } from "../../components/toast";
-import { Avatar, Bar, Button, PageHeader, Pill, Segmented, Skeleton, StatePill } from "../../components/ui";
+import { Avatar, Bar, Button, ErrorState, PageHeader, Pill, Segmented, Skeleton, StatePill } from "../../components/ui";
 import { getLocale, t } from "../../i18n";
 import { bits, bytes, dateShort, expiryText, maskedAs, num, uptime } from "../../lib/format";
 
@@ -48,11 +49,24 @@ function Kpi({ i, label, value, foot }: { i: number; label: string; value: React
   );
 }
 
+/** A card that has nothing to show because its data did not load: a way to try again, never an empty "all good". */
+function CardError({ error, onRetry }: { error: unknown; onRetry: () => void }) {
+  return <ErrorState text={errorText(error)} onRetry={onRetry} />;
+}
+
 function Kpis() {
   const o = useOverview();
-  if (!o.data) {
+  const d = o.data;
+  if (!d) {
+    if (o.isError) {
+      return (
+        <section className="card glass">
+          <CardError error={o.error} onRetry={() => void o.refetch()} />
+        </section>
+      );
+    }
     return (
-      <div className="grid grid-cols-2 gap-4 xl:grid-cols-4" aria-busy>
+      <div className="grid grid-cols-2 gap-4 xl:grid-cols-4" role="status" aria-busy aria-label={t("common.loading")}>
         {[0, 1, 2, 3].map((i) => (
           <section key={i} className="card glass kpi">
             <Skeleton style={{ width: "50%" }} />
@@ -62,9 +76,17 @@ function Kpis() {
       </div>
     );
   }
-  const d = o.data;
   const delta = d.traffic_yesterday > 0 ? Math.round(((d.traffic_today - d.traffic_yesterday) / d.traffic_yesterday) * 100) : null;
   const [value, unit] = bytes(d.traffic_today).split(" ");
+  return (
+    <>
+      {o.isError ? <StaleNotice onRetry={() => void o.refetch()} retrying={o.isFetching} /> : null}
+      <KpiGrid d={d} delta={delta} value={value} unit={unit} />
+    </>
+  );
+}
+
+function KpiGrid({ d, delta, value, unit }: { d: Overview; delta: number | null; value?: string; unit?: string }) {
   return (
     <div className="grid grid-cols-2 gap-4 xl:grid-cols-4">
       <Kpi i={0} label={t("dashboard.online")} value={num(d.online)} foot={<span>{t("dashboard.onlineFoot")}</span>} />
@@ -137,15 +159,21 @@ function TrafficCard() {
           ]}
         />
       </div>
-      {traffic.isPending ? <Skeleton style={{ height: 220, borderRadius: 16 }} /> : <TrafficChart points={points} range={range} />}
-      <div className="mt-3 flex flex-wrap gap-x-6 gap-y-2 text-[13px] text-[var(--ink-500)]">
-        <span>
-          {t("chart.down")} <b className="num font-semibold text-[var(--ink-900)]">{bytes(totalDown)}</b>
-        </span>
-        <span>
-          {t("chart.up")} <b className="num font-semibold text-[var(--ink-900)]">{bytes(totalUp)}</b>
-        </span>
-      </div>
+      <QueryBoundary query={traffic} pending={<Skeleton style={{ height: 220, borderRadius: 16 }} />}>
+        {() => (
+          <>
+            <TrafficChart points={points} range={range} />
+            <div className="mt-3 flex flex-wrap gap-x-6 gap-y-2 text-[13px] text-[var(--ink-500)]">
+              <span>
+                {t("chart.down")} <b className="num font-semibold text-[var(--ink-900)]">{bytes(totalDown)}</b>
+              </span>
+              <span>
+                {t("chart.up")} <b className="num font-semibold text-[var(--ink-900)]">{bytes(totalUp)}</b>
+              </span>
+            </div>
+          </>
+        )}
+      </QueryBoundary>
     </section>
   );
 }
@@ -171,6 +199,13 @@ function ServerCard() {
           {t("dashboard.nodeUnreachable")} <span className="mono">mikan logs node</span>
         </div>
       ) : null}
+      {node.isError ? (
+        n ? (
+          <StaleNotice onRetry={() => void node.refetch()} retrying={node.isFetching} />
+        ) : (
+          <CardError error={node.error} onRetry={() => void node.refetch()} />
+        )
+      ) : null}
       <div className="mb-4 grid grid-cols-3 gap-2">
         <div className="metric">
           <div className="metric-label">CPU</div>
@@ -178,7 +213,7 @@ function ServerCard() {
             {n ? Math.round(n.system.cpu_percent) : "—"}
             <small>%</small>
           </div>
-          <Bar pct={n?.system.cpu_percent ?? 0} className="mt-2" />
+          <Bar pct={n?.system.cpu_percent ?? 0} className="mt-2" label="CPU" />
         </div>
         <div className="metric">
           <div className="metric-label">{t("dashboard.memory")}</div>
@@ -186,13 +221,14 @@ function ServerCard() {
             {n ? Math.round(memPct) : "—"}
             <small>%</small>
           </div>
-          <Bar pct={memPct} className="mt-2" />
+          <Bar pct={memPct} className="mt-2" label={t("dashboard.memory")} />
         </div>
         <div className="metric">
           <div className="metric-label">{t("dashboard.netDown")}</div>
           <div className="metric-value num text-[15px]">{n ? bits(n.system.net_rx_bps) : "—"}</div>
         </div>
       </div>
+      {inbounds.isError && !inbounds.data ? <CardError error={inbounds.error} onRetry={() => void inbounds.refetch()} /> : null}
       <div className="row-list border-t border-[var(--hairline)]">
         {(inbounds.data ?? []).map((l) => (
           <div key={l.id} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 py-3">
@@ -223,14 +259,22 @@ function ServerCard() {
   );
 }
 
+const ATTENTION_ROWS = 5;
+
 function AttentionCard() {
-  const expiring = useUsers({ state: "expiring", q: "" });
-  const limited = useUsers({ state: "limited", q: "" });
-  const expired = useUsers({ state: "expired", q: "" });
+  // Five rows are shown, so five are asked for, and not every ten seconds.
+  const few = { limit: ATTENTION_ROWS, refetchInterval: 30_000 };
+  const expiring = useUsers({ state: "expiring", q: "" }, few);
+  const limited = useUsers({ state: "limited", q: "" }, few);
+  const expired = useUsers({ state: "expired", q: "" }, few);
   const toast = useToast();
   const extend = useUserMutation(userActions.extend);
-  const list: User[] = [...(limited.data?.items ?? []), ...(expiring.data?.items ?? []), ...(expired.data?.items ?? [])].slice(0, 5);
-  const loading = expiring.isPending || limited.isPending || expired.isPending;
+  const list: User[] = [...(limited.data?.items ?? []), ...(expiring.data?.items ?? []), ...(expired.data?.items ?? [])].slice(0, ATTENTION_ROWS);
+  const queries = [limited, expiring, expired];
+  // One list that did not load is not "all good": the user it would have shown is missing.
+  const failed = queries.find((q) => q.data === undefined && q.isError);
+  const loading = !failed && queries.some((q) => q.data === undefined);
+  const retry = () => queries.forEach((q) => void q.refetch());
   return (
     <section className="card glass reveal" style={{ "--i": 6 } as React.CSSProperties} aria-labelledby="att-title">
       <div className="card-head">
@@ -238,11 +282,13 @@ function AttentionCard() {
           <h2 className="card-title" id="att-title">
             {t("dashboard.attention")}
           </h2>
-          <div className="card-sub">{loading ? "…" : list.length ? t("dashboard.attentionSub") : t("dashboard.allGood")}</div>
+          <div className="card-sub">{loading || failed ? "…" : list.length ? t("dashboard.attentionSub") : t("dashboard.allGood")}</div>
         </div>
       </div>
-      {loading ? (
-        <div className="space-y-3">
+      {failed ? (
+        <CardError error={failed.error} onRetry={retry} />
+      ) : loading ? (
+        <div className="space-y-3" role="status" aria-busy aria-label={t("common.loading")}>
           <Skeleton style={{ height: 36 }} />
           <Skeleton style={{ height: 36 }} />
         </div>
@@ -305,7 +351,9 @@ function TopCard() {
           <div className="card-sub">{t("dashboard.topSub")}</div>
         </div>
       </div>
-      {o.isPending ? (
+      {o.data === undefined && o.isError ? (
+        <CardError error={o.error} onRetry={() => void o.refetch()} />
+      ) : o.isPending ? (
         <Skeleton style={{ height: 120 }} />
       ) : top.length === 0 ? (
         <p className="py-6 text-center text-[13px] text-[var(--ink-500)]">{t("dashboard.topEmpty")}</p>

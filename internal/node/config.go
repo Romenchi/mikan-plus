@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/metacubex/mihomo/listener"
+
 	"mikan/internal/nodeapi"
 	"mikan/internal/proto"
 )
@@ -29,7 +31,7 @@ var privateRules = []string{
 const relayProxy = "RELAY"
 
 func relayRules(st nodeapi.DesiredState) []string {
-	r := st.Relay
+	r := st.UpstreamRelay
 	if r == nil || !r.Enabled || r.Server == "" || r.Port <= 0 {
 		return nil
 	}
@@ -46,7 +48,7 @@ func relayRules(st nodeapi.DesiredState) []string {
 	return res
 }
 
-func relayProxyConfig(r *nodeapi.Relay) (map[string]any, error) {
+func relayProxyConfig(r *nodeapi.UpstreamRelay) (map[string]any, error) {
 	if r == nil || !r.Enabled || r.Server == "" || r.Port <= 0 {
 		return nil, nil
 	}
@@ -108,51 +110,76 @@ func rules(st nodeapi.DesiredState, allowPrivate bool) []string {
 	}
 	// Outbound SMTP from a shared VPN IP gets the address blacklisted within hours.
 	r = append(r, "DST-PORT,25,REJECT")
+	r = append(r, exitRules(st)...)
 	r = append(r, warpRules(st)...)
 	r = append(r, relayRules(st)...)
-	if st.Relay != nil && st.Relay.Enabled && len(st.Relay.Inbounds) == 0 {
+	if st.UpstreamRelay != nil && st.UpstreamRelay.Enabled && len(st.UpstreamRelay.Inbounds) == 0 {
 		return append(r, "MATCH,"+relayProxy)
 	}
 	return append(r, "MATCH,DIRECT")
 }
 
-// outbounds are the proxies besides DIRECT: WARP and Relay when configured.
+// outbounds are the proxies besides DIRECT: WARP, UpstreamRelay, and the other nodes used as exits.
 func outbounds(st nodeapi.DesiredState) ([]any, error) {
-	var list []any
+	out := []any{}
 	if st.Warp != nil {
 		p, err := warpProxyConfig(st.Warp)
 		if err != nil {
 			return nil, err
 		}
-		list = append(list, p)
+		out = append(out, p)
 	}
-	if st.Relay != nil {
-		p, err := relayProxyConfig(st.Relay)
+	if st.UpstreamRelay != nil {
+		p, err := relayProxyConfig(st.UpstreamRelay)
 		if err != nil {
 			return nil, err
 		}
 		if p != nil {
-			list = append(list, p)
+			out = append(out, p)
 		}
 	}
-	return list, nil
+	for _, e := range st.Exits {
+		p, err := exitProxyConfig(e)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, nil
 }
 
 // buildConfig renders the mihomo config as JSON, which mihomo's YAML parser accepts.
 // log-level warning keeps per-connection lines out of mihomo's own output; the ones that
 // still come through are dropped by pumpLogs.
-func buildConfig(st nodeapi.DesiredState, cert proto.Cert, allowPrivate bool) ([]byte, error) {
-	listeners := make([]map[string]any, 0, len(st.Inbounds))
-	for _, in := range st.Inbounds {
-		l, err := listenerFor(in, st.Slots, cert, proto.Options{SelfStealPort: st.SelfStealPort})
+//
+// A listener that does not pass the checks is left out and reported in rejected (not OK,
+// with the reason): one broken inbound must not stop the node from taking every other
+// change of the state, new users and policies included. What the whole state needs, the
+// outbounds, is an error as before.
+func buildConfig(st nodeapi.DesiredState, cert proto.Cert, allowPrivate bool) (raw []byte, rejected []nodeapi.ListenerStatus, err error) {
+	listeners := make([]map[string]any, 0, len(st.Inbounds)+1)
+	keep := func(name string, l map[string]any, err error) {
+		if err == nil {
+			// The parser mihomo applies the config with; it opens nothing.
+			_, err = listener.ParseListener(l)
+		}
 		if err != nil {
-			return nil, fmt.Errorf("inbound %s: %w", in.Name, err)
+			rejected = append(rejected, nodeapi.ListenerStatus{Name: name, Error: err.Error()})
+			return
 		}
 		listeners = append(listeners, l)
 	}
+	for _, in := range st.Inbounds {
+		l, err := listenerFor(in, st.Slots, cert, proto.Options{SelfStealPort: st.SelfStealPort})
+		keep(in.Name, l, err)
+	}
+	if st.Relay != nil {
+		l, err := relayListener(st.Relay, cert)
+		keep(nodeapi.RelayListener, l, err)
+	}
 	proxies, err := outbounds(st)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	cfg := map[string]any{
 		"mode":              "rule",
@@ -167,7 +194,8 @@ func buildConfig(st nodeapi.DesiredState, cert proto.Cert, allowPrivate bool) ([
 		"rules":             rules(st, allowPrivate),
 		"listeners":         listeners,
 	}
-	return json.Marshal(cfg)
+	raw, err = json.Marshal(cfg)
+	return raw, rejected, err
 }
 
 func listenerFor(in nodeapi.Inbound, slots []nodeapi.Slot, cert proto.Cert, o proto.Options) (map[string]any, error) {

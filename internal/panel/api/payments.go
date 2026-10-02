@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
-	"regexp"
-	"strings"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -17,44 +15,35 @@ import (
 )
 
 type PaymentSettingsView struct {
-	Stars              bool   `json:"stars" doc:"Telegram Stars: нужен только запущенный бот"`
-	YooKassa           bool   `json:"yookassa"`
-	YooKassaShopID     string `json:"yookassa_shop_id"`
-	YooKassaSecretSet  bool   `json:"yookassa_secret_set" doc:"Секретный ключ сохранён; сам ключ API не отдаёт"`
-	CryptoBot          bool   `json:"cryptobot"`
-	CryptoBotTestnet   bool   `json:"cryptobot_testnet"`
-	CryptoBotTokenSet  bool   `json:"cryptobot_token_set"`
-	AllowNew           bool   `json:"allow_new" doc:"Новые люди могут купить подписку в боте; иначе — только продление"`
-	RenewResetsTraffic bool   `json:"renew_resets_traffic" doc:"Оплаченное продление обнуляет трафик и начинает новый период; иначе только добавляет срок"`
+	Enabled            bool `json:"enabled" doc:"Продажа подписок: выключено — бот и Mini App ничего не продают, новые счета не создаются, уже открытые засчитываются"`
+	Stars              bool `json:"stars" doc:"Telegram Stars: нужен только запущенный бот"`
+	AllowNew           bool `json:"allow_new" doc:"Новые люди могут купить подписку в боте; иначе — только продление"`
+	RenewResetsTraffic bool `json:"renew_resets_traffic" doc:"Оплаченное продление обнуляет трафик и начинает новый период; иначе только добавляет срок"`
 	Available          struct {
-		Stars     bool `json:"stars"`
-		YooKassa  bool `json:"yookassa"`
-		CryptoBot bool `json:"cryptobot"`
+		Stars  bool     `json:"stars"`
+		Addons []string `json:"addons" doc:"Адаптеры маркетплейса, которые принимают оплату прямо сейчас"`
 	} `json:"available" doc:"Что принимает оплату прямо сейчас: включено, настроено, для Stars — бот запущен"`
-	WebhookYooKassa  string `json:"webhook_yookassa" doc:"Адрес для HTTP-уведомлений в личном кабинете ЮKassa"`
-	WebhookCryptoBot string `json:"webhook_cryptobot" doc:"Адрес вебхуков в настройках приложения @CryptoBot"`
+	OnSale int `json:"on_sale" doc:"Сколько тарифов бот может продать прямо сейчас: «В продаже» и с ценой для способа, который принимает оплату"`
+	// Moving: the built-in YooKassa and CryptoBot moved to the marketplace in 0.4.4; their
+	// adapters are installed after the update.
+	Moving []string `json:"moving" doc:"Встроенные ЮKassa и CryptoBot переехали в маркетплейс: адаптеры, которые сервер ещё ставит"`
 }
 
 type paymentSettingsOutput struct{ Body PaymentSettingsView }
 
 type patchPaymentSettingsInput struct {
 	Body struct {
-		Stars              *bool   `json:"stars,omitempty"`
-		YooKassa           *bool   `json:"yookassa,omitempty"`
-		YooKassaShopID     *string `json:"yookassa_shop_id,omitempty" maxLength:"20"`
-		YooKassaSecret     *string `json:"yookassa_secret,omitempty" maxLength:"200" doc:"Пусто — удалить ключ"`
-		CryptoBot          *bool   `json:"cryptobot,omitempty"`
-		CryptoBotTestnet   *bool   `json:"cryptobot_testnet,omitempty"`
-		CryptoBotToken     *string `json:"cryptobot_token,omitempty" maxLength:"200" doc:"Пусто — удалить токен"`
-		AllowNew           *bool   `json:"allow_new,omitempty"`
-		RenewResetsTraffic *bool   `json:"renew_resets_traffic,omitempty"`
+		Enabled            *bool `json:"enabled,omitempty"`
+		Stars              *bool `json:"stars,omitempty"`
+		AllowNew           *bool `json:"allow_new,omitempty"`
+		RenewResetsTraffic *bool `json:"renew_resets_traffic,omitempty"`
 	}
 }
 
 type PaymentView struct {
 	ID         int64      `json:"id"`
-	Provider   string     `json:"provider" enum:"stars,yookassa,cryptobot"`
-	Kind       string     `json:"kind" enum:"new,renew"`
+	Provider   string     `json:"provider" doc:"stars или addon:<id> — адаптер маркетплейса"`
+	Kind       string     `json:"kind" enum:"new,renew,package" doc:"package — пакет трафика: tariff_name — название пакета"`
 	Status     string     `json:"status" enum:"pending,paid,applied,expired,failed,refunded"`
 	TgID       int64      `json:"tg_id"`
 	TgUsername string     `json:"tg_username,omitempty"`
@@ -79,7 +68,7 @@ type PaymentTotal struct {
 
 type listPaymentsInput struct {
 	Status   string `query:"status" enum:"pending,paid,applied,expired,failed,refunded,"`
-	Provider string `query:"provider" enum:"stars,yookassa,cryptobot,"`
+	Provider string `query:"provider" pattern:"^(stars|addon:[a-z0-9][a-z0-9-]{0,31})?$"`
 	UserID   int64  `query:"user_id" minimum:"0"`
 	Before   int64  `query:"before" minimum:"0" doc:"id последнего платежа предыдущей страницы"`
 	Limit    int64  `query:"limit" minimum:"1" maximum:"200" default:"50"`
@@ -103,21 +92,26 @@ func (h *handlers) registerPayments() {
 }
 
 func (h *handlers) paymentSettings(ctx context.Context) (PaymentSettingsView, error) {
-	c := h.d.Billing.Config(ctx)
-	v := PaymentSettingsView{Stars: c.Stars, YooKassa: c.YooKassa, YooKassaShopID: c.ShopID, CryptoBot: c.CryptoBot, CryptoBotTestnet: c.Testnet, AllowNew: c.AllowNew, RenewResetsTraffic: c.RenewResetsTraffic}
-	ykSecret, err := h.d.Settings.String(ctx, billing.KeyYooKassaSecret)
+	c, err := h.d.Billing.LoadConfig(ctx)
 	if err != nil {
-		return v, err
+		return PaymentSettingsView{}, err
 	}
-	cbToken, err := h.d.Settings.String(ctx, billing.KeyCryptoBotToken)
-	if err != nil {
-		return v, err
-	}
-	v.YooKassaSecretSet, v.CryptoBotTokenSet = ykSecret != "", cbToken != ""
+	v := PaymentSettingsView{Enabled: c.Enabled, Stars: c.Stars, AllowNew: c.AllowNew, RenewResetsTraffic: c.RenewResetsTraffic}
 	av := h.d.Billing.Available(ctx)
-	v.Available.Stars, v.Available.YooKassa, v.Available.CryptoBot = av.Stars, av.YooKassa, av.CryptoBot
-	if h.d.SubBase != nil {
-		v.WebhookYooKassa, v.WebhookCryptoBot = h.d.Billing.WebhookURLs(ctx, h.d.SubBase(ctx))
+	v.Available.Stars, v.Available.Addons = av.Stars, av.Addons
+	if v.Available.Addons == nil {
+		v.Available.Addons = []string{}
+	}
+	offers, _, err := h.d.Billing.Offers(ctx)
+	if err != nil {
+		return v, err
+	}
+	v.OnSale = len(offers)
+	if v.Moving, err = h.d.Billing.Moving(ctx); err != nil {
+		return v, err
+	}
+	if v.Moving == nil {
+		v.Moving = []string{}
 	}
 	return v, nil
 }
@@ -130,69 +124,22 @@ func (h *handlers) getPaymentSettings(ctx context.Context, _ *struct{}) (*paymen
 	return &paymentSettingsOutput{Body: v}, nil
 }
 
-var shopIDPattern = regexp.MustCompile(`^[0-9]{1,20}$`)
-
 func (h *handlers) updatePaymentSettings(ctx context.Context, in *patchPaymentSettingsInput) (*paymentSettingsOutput, error) {
 	b := in.Body
-	c := h.d.Billing.Config(ctx)
-	for dst, v := range map[*bool]*bool{&c.Stars: b.Stars, &c.YooKassa: b.YooKassa, &c.CryptoBot: b.CryptoBot, &c.Testnet: b.CryptoBotTestnet, &c.AllowNew: b.AllowNew, &c.RenewResetsTraffic: b.RenewResetsTraffic} {
+	c, err := h.d.Billing.LoadConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for dst, v := range map[*bool]*bool{&c.Enabled: b.Enabled, &c.Stars: b.Stars, &c.AllowNew: b.AllowNew, &c.RenewResetsTraffic: b.RenewResetsTraffic} {
 		if v != nil {
 			*dst = *v
 		}
 	}
-	if b.YooKassaShopID != nil {
-		c.ShopID = strings.TrimSpace(*b.YooKassaShopID)
-		if c.ShopID != "" && !shopIDPattern.MatchString(c.ShopID) {
-			return nil, huma.Error422UnprocessableEntity("validation", &huma.ErrorDetail{Location: "body.yookassa_shop_id", Message: "shop_id_invalid"})
-		}
-	}
-	ykSecret, err := h.d.Settings.String(ctx, billing.KeyYooKassaSecret)
-	if err != nil {
-		return nil, err
-	}
-	cbToken, err := h.d.Settings.String(ctx, billing.KeyCryptoBotToken)
-	if err != nil {
-		return nil, err
-	}
-	if b.YooKassaSecret != nil {
-		ykSecret = strings.TrimSpace(*b.YooKassaSecret)
-	}
-	if b.CryptoBotToken != nil {
-		cbToken = strings.TrimSpace(*b.CryptoBotToken)
-	}
-	// New keys are tried before they are saved: a typo shows now, not at the first sale.
-	if (b.YooKassaSecret != nil || b.YooKassaShopID != nil) && ykSecret != "" && c.ShopID != "" {
-		if err := h.d.Billing.CheckYooKassa(ctx, c.ShopID, ykSecret); err != nil {
-			return nil, huma.Error422UnprocessableEntity("validation", &huma.ErrorDetail{Location: "body.yookassa_secret", Message: "yookassa_keys_invalid", Value: billing.ErrorCode(err)})
-		}
-	}
-	if (b.CryptoBotToken != nil || b.CryptoBotTestnet != nil) && cbToken != "" {
-		if err := h.d.Billing.CheckCryptoBot(ctx, cbToken, c.Testnet); err != nil {
-			return nil, huma.Error422UnprocessableEntity("validation", &huma.ErrorDetail{Location: "body.cryptobot_token", Message: "cryptobot_token_invalid", Value: billing.ErrorCode(err)})
-		}
-	}
-	if c.YooKassa && (c.ShopID == "" || ykSecret == "") {
-		return nil, huma.Error422UnprocessableEntity("validation", &huma.ErrorDetail{Location: "body.yookassa", Message: "yookassa_not_configured"})
-	}
-	if c.CryptoBot && cbToken == "" {
-		return nil, huma.Error422UnprocessableEntity("validation", &huma.ErrorDetail{Location: "body.cryptobot", Message: "cryptobot_not_configured"})
-	}
 	if err := settings.Set(ctx, h.d.Settings, billing.KeyConfig, c); err != nil {
 		return nil, err
 	}
-	if b.YooKassaSecret != nil {
-		if err := settings.Set(ctx, h.d.Settings, billing.KeyYooKassaSecret, ykSecret); err != nil {
-			return nil, err
-		}
-	}
-	if b.CryptoBotToken != nil {
-		if err := settings.Set(ctx, h.d.Settings, billing.KeyCryptoBotToken, cbToken); err != nil {
-			return nil, err
-		}
-	}
-	// What changed, never the secrets themselves.
-	h.audit(ctx, sessionOf(ctx).AdminID, "payments.settings", "", "", map[string]any{"stars": c.Stars, "yookassa": c.YooKassa, "cryptobot": c.CryptoBot,
-		"allow_new": c.AllowNew, "renew_resets_traffic": c.RenewResetsTraffic, "yookassa_secret_changed": b.YooKassaSecret != nil, "cryptobot_token_changed": b.CryptoBotToken != nil})
+	h.audit(ctx, sessionOf(ctx).AdminID, "payments.settings", "", "", map[string]any{"enabled": c.Enabled, "stars": c.Stars,
+		"allow_new": c.AllowNew, "renew_resets_traffic": c.RenewResetsTraffic})
 	v, err := h.paymentSettings(ctx)
 	if err != nil {
 		return nil, err
@@ -208,14 +155,23 @@ func unixPtr(n sql.NullInt64) *time.Time {
 	return &t
 }
 
-func (h *handlers) viewPayment(ctx context.Context, p db.Payment) PaymentView {
+// paymentView is a payment without the names; the list's query brings those along.
+func paymentView(p db.Payment) PaymentView {
 	v := PaymentView{ID: p.ID, Provider: p.Provider, Kind: p.Kind, Status: p.Status, TgID: p.TgID, TariffName: p.TariffName, Amount: p.Amount,
 		Currency: p.Currency, ExternalID: p.ExternalID.String, Error: p.Error, CreatedAt: time.Unix(p.CreatedAt, 0).UTC(),
 		PaidAt: unixPtr(p.PaidAt), AppliedAt: unixPtr(p.AppliedAt), RefundedAt: unixPtr(p.RefundedAt)}
 	if p.UserID.Valid {
 		id := p.UserID.Int64
 		v.UserID = &id
-		if u, err := h.d.Store.Q.GetUser(ctx, id); err == nil {
+	}
+	return v
+}
+
+// viewPayment is one payment with the user's and the buyer's names.
+func (h *handlers) viewPayment(ctx context.Context, p db.Payment) PaymentView {
+	v := paymentView(p)
+	if p.UserID.Valid {
+		if u, err := h.d.Store.Q.GetUser(ctx, p.UserID.Int64); err == nil {
 			v.UserName = u.Name
 		}
 	}
@@ -236,8 +192,10 @@ func (h *handlers) listPayments(ctx context.Context, in *listPaymentsInput) (*pa
 	}
 	out := &paymentsOutput{}
 	out.Body.Items = make([]PaymentView, 0, len(rows))
-	for _, p := range rows {
-		out.Body.Items = append(out.Body.Items, h.viewPayment(ctx, p))
+	for _, r := range rows {
+		v := paymentView(r.Payment)
+		v.UserName, v.TgUsername = r.UserName, r.TgUsername
+		out.Body.Items = append(out.Body.Items, v)
 	}
 	totals, err := h.d.Store.Q.PaymentTotals(ctx, sql.NullInt64{Int64: h.d.Now().Add(-30 * 24 * time.Hour).Unix(), Valid: true})
 	if err != nil {

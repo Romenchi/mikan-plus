@@ -66,13 +66,16 @@ func warpRules(st nodeapi.DesiredState) []string {
 	if w == nil {
 		return nil
 	}
-	present := map[string]bool{}
-	for _, in := range st.Inbounds {
-		present[in.Name] = true
+	present := listenerNames(st)
+	viaExit := map[string]bool{} // an inbound sent to another node does not use WARP here
+	for _, e := range st.Exits {
+		for _, n := range e.Inbounds {
+			viaExit[n] = true
+		}
 	}
 	var r []string
 	for _, name := range w.Inbounds {
-		if present[name] && safeRuleValue(name) {
+		if present[name] && !viaExit[name] && safeRuleValue(name) {
 			r = append(r, "IN-NAME,"+name+","+warpProxy)
 		}
 	}
@@ -95,10 +98,10 @@ func warpRules(st nodeapi.DesiredState) []string {
 	return r
 }
 
-// warpStatus asks Cloudflare's trace page through the WARP outbound what it sees.
-func warpStatus(ctx context.Context) nodeapi.WarpStatus {
+// probe asks Cloudflare's trace page through an outbound (WARP, NODE-<id>) what it sees.
+func probe(ctx context.Context, proxy string) nodeapi.WarpStatus {
 	st := nodeapi.WarpStatus{Configured: true, CheckedAt: time.Now().UTC()}
-	p, ok := tunnel.Proxies()[warpProxy]
+	p, ok := tunnel.Proxies()[proxy]
 	if !ok {
 		st.Error = "not_loaded"
 		return st

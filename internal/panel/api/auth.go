@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 
 	"mikan/internal/panel/auth"
+	"mikan/internal/panel/secure"
 	"mikan/internal/panel/store/db"
 )
 
@@ -59,8 +61,15 @@ type logoutOutput struct {
 
 type passwordInput struct {
 	Body struct {
-		Current string `json:"current" minLength:"1" maxLength:"256"`
-		New     string `json:"new" minLength:"12" maxLength:"256" doc:"Не короче 12 символов"`
+		Current    string `json:"current" minLength:"1" maxLength:"256"`
+		New        string `json:"new" minLength:"12" maxLength:"256" doc:"Не короче 12 символов"`
+		RevokeKeys *bool  `json:"revoke_keys,omitempty" doc:"Отозвать и ключи API (по умолчанию да): другие сессии завершаются при смене пароля, ключ, выпущенный из угнанной сессии, пережил бы это"`
+	}
+}
+
+type totpSetupInput struct {
+	Body struct {
+		Password string `json:"password" minLength:"1" maxLength:"256" doc:"Пароль: без него украденная сессия включила бы 2FA на себя и закрыла вход владельцу"`
 	}
 }
 
@@ -143,17 +152,49 @@ func tooManyAttempts(wait time.Duration) error {
 	return huma.ErrorWithHeaders(huma.Error429TooManyRequests("rate_limited"), http.Header{"Retry-After": {strconv.Itoa(secs)}})
 }
 
+// limitIP is what the limiters count an address as: one client of IPv6 owns a whole /64,
+// so counting single addresses would give an attacker 2^64 fresh allowances.
+func limitIP(ip string) string {
+	a, err := netip.ParseAddr(ip)
+	if err != nil {
+		return ip
+	}
+	if a = a.Unmap(); a.Is6() {
+		if p, err := a.Prefix(64); err == nil {
+			return p.String()
+		}
+	}
+	return a.String()
+}
+
+// verifyPassword runs the password hash. Each run takes 64 MiB: only a few at a time, so
+// a burst of logins queues instead of exhausting the server's memory.
+func (h *handlers) verifyPassword(ctx context.Context, password, hash string) (bool, error) {
+	select {
+	case h.hashSem <- struct{}{}:
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+	defer func() { <-h.hashSem }()
+	return auth.VerifyPassword(password, hash)
+}
+
 func (h *handlers) login(ctx context.Context, in *loginInput) (*loginOutput, error) {
 	c := clientOf(ctx)
 	now := h.d.Now()
 	username := strings.ToLower(strings.TrimSpace(in.Body.Username))
-	ipKey, userKey := "ip:"+c.IP, "user:"+username
-	if ok, wait := h.d.IPLimit.Allowed(ipKey, now); !ok {
-		return nil, tooManyAttempts(wait)
+	ipKey, userKey := "ip:"+limitIP(c.IP), "user:"+username
+	// The attempt is counted before the password is hashed: parallel requests all passed a
+	// check made first and counted after, each getting its own free guess.
+	okIP, waitIP, blockedIP := h.d.IPLimit.Reserve(ipKey, now)
+	if !okIP {
+		return nil, tooManyAttempts(waitIP)
 	}
-	if ok, wait := h.d.UserLimit.Allowed(userKey, now); !ok {
-		return nil, tooManyAttempts(wait)
+	okUser, waitUser, blockedUser := h.d.UserLimit.Reserve(userKey, now)
+	if !okUser {
+		return nil, tooManyAttempts(waitUser)
 	}
+	blocked := blockedIP || blockedUser
 
 	admin, err := h.d.Store.Q.GetAdminByUsername(ctx, username)
 	found := err == nil
@@ -165,12 +206,12 @@ func (h *handlers) login(ctx context.Context, in *loginInput) (*loginOutput, err
 		hash = admin.PasswordHash
 	}
 	// The dummy hash keeps timing identical for unknown usernames.
-	ok, err := auth.VerifyPassword(in.Body.Password, hash)
+	ok, err := h.verifyPassword(ctx, in.Body.Password, hash)
 	if err != nil && found {
 		return nil, err
 	}
 	if !found || !ok {
-		h.loginFailed(ctx, ipKey, userKey, username, "bad_password")
+		h.loginFailed(ctx, username, found, "bad_password", blocked)
 		return nil, huma.Error401Unauthorized("invalid_credentials")
 	}
 
@@ -180,13 +221,13 @@ func (h *handlers) login(ctx context.Context, in *loginInput) (*loginOutput, err
 			return nil, huma.Error401Unauthorized("totp_required")
 		}
 		if !h.d.TOTP.Validate(admin.ID, admin.TotpSecret.String, code, now) {
-			rest, used := auth.UseRecoveryCode(admin.RecoveryCodes.String, code)
-			if !used {
-				h.loginFailed(ctx, ipKey, userKey, username, "bad_totp")
-				return nil, huma.Error401Unauthorized("invalid_totp")
-			}
-			if err := h.d.Store.Q.SetAdminRecoveryCodes(ctx, db.SetAdminRecoveryCodesParams{RecoveryCodes: sql.NullString{String: rest, Valid: true}, ID: admin.ID}); err != nil {
+			used, err := h.spendRecoveryCode(ctx, admin, code)
+			if err != nil {
 				return nil, err
+			}
+			if !used {
+				h.loginFailed(ctx, username, true, "bad_totp", blocked)
+				return nil, huma.Error401Unauthorized("invalid_totp")
 			}
 			h.audit(ctx, admin.ID, "auth.recovery_code_used", "admin", admin.Username, nil)
 		}
@@ -205,11 +246,51 @@ func (h *handlers) login(ctx context.Context, in *loginInput) (*loginOutput, err
 	return &loginOutput{SetCookie: sessionCookie(token, auth.MaxTTL), Body: MeBody{Admin: viewAdmin(admin), CSRFToken: sess.CsrfToken}}, nil
 }
 
-func (h *handlers) loginFailed(ctx context.Context, ipKey, userKey, username, reason string) {
+// loginFailed writes the audit entry of a refused login (the attempt itself was counted
+// when it started). A name nobody has is not kept as typed: it is often a password pasted
+// into the wrong field, and the log is readable; a short hash tells repeats apart.
+func (h *handlers) loginFailed(ctx context.Context, username string, known bool, reason string, blocked bool) {
+	target := username
+	if !known {
+		target = "unknown:" + secure.SHA256Hex(username)[:8]
+	}
+	h.audit(ctx, 0, "auth.login_failed", "admin", target, map[string]any{"reason": reason, "blocked": blocked})
+}
+
+// spendRecoveryCode uses a recovery code of the admin's if code is one. The code leaves the
+// stored list only if the list is still the one it was found in: of two logins with the
+// same code, one is refused.
+func (h *handlers) spendRecoveryCode(ctx context.Context, admin db.Admin, code string) (bool, error) {
+	rest, ok := auth.UseRecoveryCode(admin.RecoveryCodes.String, code)
+	if !ok {
+		return false, nil
+	}
+	n, err := h.d.Store.Q.SpendAdminRecoveryCodes(ctx, db.SpendAdminRecoveryCodesParams{Rest: sql.NullString{String: rest, Valid: true}, ID: admin.ID, Was: admin.RecoveryCodes})
+	return n == 1, err
+}
+
+// reauth asks a session for the admin's password, and the TOTP code when 2FA is on, before
+// what a stolen session must not do alone: minting an API key, starting 2FA. Wrong answers
+// count against the admin's own allowance, so the password cannot be guessed through a
+// session.
+func (h *handlers) reauth(ctx context.Context, admin db.Admin, password, code string) error {
 	now := h.d.Now()
-	blockedIP := h.d.IPLimit.Fail(ipKey, now)
-	blockedUser := h.d.UserLimit.Fail(userKey, now)
-	h.audit(ctx, 0, "auth.login_failed", "admin", username, map[string]any{"reason": reason, "blocked": blockedIP || blockedUser})
+	key := "reauth:" + strconv.FormatInt(admin.ID, 10)
+	if ok, wait, _ := h.d.UserLimit.Reserve(key, now); !ok {
+		return tooManyAttempts(wait)
+	}
+	ok, err := h.verifyPassword(ctx, password, admin.PasswordHash)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return huma.Error422UnprocessableEntity("wrong_password", &huma.ErrorDetail{Location: "body.password", Message: "wrong_password"})
+	}
+	if admin.TotpSecret.Valid && !h.d.TOTP.Validate(admin.ID, admin.TotpSecret.String, code, now) {
+		return huma.Error422UnprocessableEntity("invalid_totp", &huma.ErrorDetail{Location: "body.totp", Message: "invalid_totp"})
+	}
+	h.d.UserLimit.Reset(key)
+	return nil
 }
 
 func (h *handlers) logout(ctx context.Context, _ *struct{}) (*logoutOutput, error) {
@@ -236,7 +317,7 @@ func (h *handlers) changePassword(ctx context.Context, in *passwordInput) (*stru
 	if err != nil {
 		return nil, err
 	}
-	ok, err := auth.VerifyPassword(in.Body.Current, admin.PasswordHash)
+	ok, err := h.verifyPassword(ctx, in.Body.Current, admin.PasswordHash)
 	if err != nil {
 		return nil, err
 	}
@@ -247,17 +328,31 @@ func (h *handlers) changePassword(ctx context.Context, in *passwordInput) (*stru
 	if err != nil {
 		return nil, err
 	}
-	if err := h.d.Store.Q.SetAdminPassword(ctx, db.SetAdminPasswordParams{PasswordHash: hash, ID: admin.ID}); err != nil {
+	var keys int64
+	err = h.d.Store.Tx(ctx, func(q *db.Queries) error {
+		if err := q.SetAdminPassword(ctx, db.SetAdminPasswordParams{PasswordHash: hash, ID: admin.ID}); err != nil {
+			return err
+		}
+		if err := q.DeleteAdminSessionsExcept(ctx, db.DeleteAdminSessionsExceptParams{AdminID: admin.ID, IDHash: sess.IDHash}); err != nil {
+			return err
+		}
+		// The other sessions end with the old password; so do the keys, unless the admin
+		// keeps them: a key made from a hijacked session would otherwise outlive the reaction.
+		if in.Body.RevokeKeys == nil || *in.Body.RevokeKeys {
+			var err error
+			keys, err = q.DeleteAPIKeysOf(ctx, admin.ID)
+			return err
+		}
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
-	if err := h.d.Store.Q.DeleteAdminSessionsExcept(ctx, db.DeleteAdminSessionsExceptParams{AdminID: admin.ID, IDHash: sess.IDHash}); err != nil {
-		return nil, err
-	}
-	h.audit(ctx, admin.ID, "auth.password_changed", "admin", admin.Username, nil)
+	h.audit(ctx, admin.ID, "auth.password_changed", "admin", admin.Username, map[string]any{"keys_revoked": keys})
 	return nil, nil
 }
 
-func (h *handlers) totpSetup(ctx context.Context, _ *struct{}) (*totpSetupOutput, error) {
+func (h *handlers) totpSetup(ctx context.Context, in *totpSetupInput) (*totpSetupOutput, error) {
 	sess := sessionOf(ctx)
 	admin, err := h.d.Store.Q.GetAdmin(ctx, sess.AdminID)
 	if err != nil {
@@ -265,6 +360,9 @@ func (h *handlers) totpSetup(ctx context.Context, _ *struct{}) (*totpSetupOutput
 	}
 	if admin.TotpSecret.Valid {
 		return nil, huma.Error409Conflict("totp_already_enabled")
+	}
+	if err := h.reauth(ctx, admin, in.Body.Password, ""); err != nil {
+		return nil, err
 	}
 	key, err := auth.NewTOTPKey(admin.Username)
 	if err != nil {
@@ -317,7 +415,7 @@ func (h *handlers) totpDisable(ctx context.Context, in *totpDisableInput) (*stru
 	if !admin.TotpSecret.Valid {
 		return nil, nil
 	}
-	ok, err := auth.VerifyPassword(in.Body.Password, admin.PasswordHash)
+	ok, err := h.verifyPassword(ctx, in.Body.Password, admin.PasswordHash)
 	if err != nil {
 		return nil, err
 	}

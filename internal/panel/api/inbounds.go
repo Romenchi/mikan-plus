@@ -13,7 +13,6 @@ import (
 	"mikan/internal/nodeapi"
 	"mikan/internal/panel/domain"
 	"mikan/internal/panel/presets"
-	"mikan/internal/panel/settings"
 	"mikan/internal/panel/store/db"
 	"mikan/internal/panel/subs"
 	"mikan/internal/proto"
@@ -28,6 +27,7 @@ type InboundView struct {
 	Type        string   `json:"type" doc:"Тип листенера mihomo"`
 	Network     string   `json:"network"`
 	Port        string   `json:"port"`
+	Listen      string   `json:"listen" doc:"Адрес, на котором нода слушает: пусто — все адреса, 127.0.0.1 — только сам сервер (за nginx или HAProxy)"`
 	Enabled     bool     `json:"enabled"`
 	DisplayName string   `json:"display_name" doc:"Своё имя в подписке; пусто — имя по умолчанию"`
 	SubName     string   `json:"sub_name" doc:"Имя, которое увидит клиент"`
@@ -36,16 +36,29 @@ type InboundView struct {
 	ServerNames []string `json:"server_names,omitempty"`
 	// Fingerprint is the inbound's own uTLS profile, "" for the panel's default; absent when
 	// its clients do not dial through uTLS (QUIC protocols, shared keys).
-	Fingerprint *string   `json:"fingerprint,omitempty" doc:"Отпечаток TLS (uTLS) у клиентов; пусто — общий из настроек"`
-	Status      string    `json:"status" enum:"ok,error,unknown"`
-	Error       string    `json:"error,omitempty"`
-	UpdatedAt   time.Time `json:"updated_at"`
-	Apps        []string  `json:"apps" doc:"Приложения, которым подключение попадает в подписку: mihomo, xray, singbox, stash, other"`
-	Shared      bool      `json:"shared,omitempty" doc:"Один ключ на всех: учёт, лимиты и отключение по пользователям не работают"`
-	AutoPort    bool      `json:"auto_port" doc:"Панель сама переносит подключение на другой порт, если его блокируют (и включено в настройках)"`
-	AutoSNI     bool      `json:"auto_sni" doc:"Панель сама меняет сайт маскировки REALITY, если он перестал подходить (и включено в настройках)"`
-	Auto        AutoView  `json:"auto"`
-	Outbound    string    `json:"outbound" enum:"direct,warp" doc:"Выход в интернет: напрямую с сервера или через WARP ноды"`
+	Fingerprint *string        `json:"fingerprint,omitempty" doc:"Отпечаток TLS (uTLS) у клиентов; пусто — общий из настроек"`
+	Obfs        *string        `json:"obfs,omitempty" doc:"Hysteria2: salamander, gecko или пусто (без обфускации); у других типов поля нет"`
+	Status      string         `json:"status" enum:"ok,error,unknown"`
+	Error       string         `json:"error,omitempty"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+	Apps        []string       `json:"apps" doc:"Приложения, которым подключение попадает в подписку: mihomo, xray, singbox, stash, other"`
+	Shared      bool           `json:"shared,omitempty" doc:"Один ключ на всех: учёт, лимиты и отключение по пользователям не работают"`
+	AutoPort    bool           `json:"auto_port" doc:"Панель сама переносит подключение на другой порт, если его блокируют (и включено в настройках)"`
+	AutoSNI     bool           `json:"auto_sni" doc:"Панель сама меняет сайт маскировки REALITY, если он перестал подходить (и включено в настройках)"`
+	Auto        AutoView       `json:"auto"`
+	Outbound    string         `json:"outbound" enum:"direct,warp,node" doc:"Выход в интернет: напрямую с сервера, через WARP ноды или через другую ноду (каскад)"`
+	ExitNodeID  *int64         `json:"exit_node_id,omitempty" doc:"Нода, через которую выходит трафик, если outbound=node"`
+	PoolID      *int64         `json:"pool_id,omitempty" doc:"Пул трафика, в который считается подключение; нет — основной трафик"`
+	Client      ClientEndpoint `json:"client" doc:"Куда подключаются клиенты, если не к ноде напрямую (mikan.client в шаблоне)"`
+	ClientSNI   bool           `json:"client_sni" doc:"Можно ли задать клиентам свой SNI: у REALITY имя задаёт сайт маскировки"`
+}
+
+// ClientEndpoint is where clients connect when a TCP proxy or a CDN stands in front of
+// the node. Empty values (port 0) keep the node's address, the inbound's port and SNI.
+type ClientEndpoint struct {
+	Server string `json:"server" maxLength:"253" doc:"Адрес для клиентов; пусто — адрес ноды"`
+	Port   int    `json:"port" minimum:"0" maximum:"65535" doc:"Порт для клиентов; 0 — порт подключения"`
+	SNI    string `json:"sni" maxLength:"253" doc:"SNI для клиентов; пусто — как обычно"`
 }
 
 // AutoView is what the automatic moves see and last did for an inbound.
@@ -74,7 +87,7 @@ type inboundOutput struct{ Body InboundView }
 
 type createInboundInput struct {
 	Body struct {
-		Preset string `json:"preset" enum:"vless_reality_xhttp,hysteria2,tuic_v5,vless_reality_vision,vless_reality_grpc,trojan_reality,anytls,vless_reality_xhttp_pq,trusttunnel,shadowquic,mieru,shadowsocks_2022,sudoku,snell,custom"`
+		Preset string `json:"preset" enum:"vless_reality_xhttp,hysteria2,hysteria2_gecko,tuic_v5,vless_reality_vision,vless_reality_grpc,trojan_reality,anytls,vless_reality_xhttp_pq,trusttunnel,shadowquic,mieru,shadowsocks_2022,sudoku,snell,custom"`
 		NodeID int64  `json:"node_id,omitempty" minimum:"1" doc:"Нода; по умолчанию — своя нода панели"`
 		Port   string `json:"port,omitempty" pattern:"^[0-9]{1,5}(-[0-9]{1,5})?$"`
 		Dest   string `json:"dest,omitempty" maxLength:"255" doc:"host:port для REALITY"`
@@ -85,16 +98,21 @@ type createInboundInput struct {
 type patchInboundInput struct {
 	ID   int64 `path:"id" minimum:"1"`
 	Body struct {
-		Port        *string `json:"port,omitempty" pattern:"^[0-9]{1,5}(-[0-9]{1,5})?$"`
-		Enabled     *bool   `json:"enabled,omitempty"`
-		Dest        *string `json:"dest,omitempty" maxLength:"255"`
-		ServerName  *string `json:"server_name,omitempty" maxLength:"253" doc:"SNI для клиентов, если dest — IP (цель из подбора соседей)"`
-		Fingerprint *string `json:"fingerprint,omitempty" maxLength:"16" doc:"Отпечаток TLS у клиентов (chrome, firefox, safari, ios, android, edge, 360, qq, random, randomized); пусто — общий из настроек"`
-		DisplayName *string `json:"display_name,omitempty" maxLength:"200" doc:"Можно с эмодзи: «🇳🇱 Нидерланды». Пусто — имя по умолчанию"`
-		Config      *string `json:"config,omitempty" maxLength:"65536" doc:"Шаблон листенера (YAML)"`
-		AutoPort    *bool   `json:"auto_port,omitempty"`
-		AutoSNI     *bool   `json:"auto_sni,omitempty"`
-		Outbound    *string `json:"outbound,omitempty" enum:"direct,warp" doc:"Выход в интернет: напрямую или через WARP ноды"`
+		Port        *string         `json:"port,omitempty" pattern:"^[0-9]{1,5}(-[0-9]{1,5})?$"`
+		Enabled     *bool           `json:"enabled,omitempty"`
+		Dest        *string         `json:"dest,omitempty" maxLength:"255"`
+		ServerName  *string         `json:"server_name,omitempty" maxLength:"253" doc:"SNI для клиентов, если dest — IP (цель из подбора соседей)"`
+		Obfs        *string         `json:"obfs,omitempty" enum:"salamander,gecko" doc:"Обфускация Hysteria2. Gecko понимают только приложения на ядре mihomo 1.19.26+: остальные это подключение не получат"`
+		Fingerprint *string         `json:"fingerprint,omitempty" maxLength:"32" doc:"Отпечаток TLS у клиентов: из списка (chrome, firefox, safari, ios, android, edge, 360, qq, random, randomized) или своё — латиница, цифры, _; пусто — общий из настроек"`
+		DisplayName *string         `json:"display_name,omitempty" maxLength:"200" doc:"Можно с эмодзи: «🇳🇱 Нидерланды». Пусто — имя по умолчанию"`
+		Config      *string         `json:"config,omitempty" maxLength:"65536" doc:"Шаблон листенера (YAML)"`
+		Listen      *string         `json:"listen,omitempty" maxLength:"64" doc:"Адрес, на котором нода слушает: пусто — все адреса, иначе один IP (127.0.0.1 — за nginx или HAProxy на том же сервере). Свой адрес выключает перенос порта"`
+		Client      *ClientEndpoint `json:"client,omitempty" doc:"Куда подключаются клиенты: адрес, порт и SNI прокси перед нодой; заменяет все три"`
+		AutoPort    *bool           `json:"auto_port,omitempty" doc:"Нельзя включить, пока у подключения свой адрес (listen)"`
+		AutoSNI     *bool           `json:"auto_sni,omitempty"`
+		Outbound    *string         `json:"outbound,omitempty" enum:"direct,warp,node" doc:"Выход в интернет: напрямую, через WARP ноды или через другую ноду"`
+		ExitNodeID  *int64          `json:"exit_node_id,omitempty" minimum:"1" doc:"Для outbound=node: через какую ноду"`
+		PoolID      *int64          `json:"pool_id,omitempty" minimum:"0" doc:"Пул трафика; 0 — основной трафик"`
 	}
 }
 
@@ -144,8 +162,16 @@ func (h *handlers) lastAuto(ctx context.Context) (map[int64]db.InboundEvent, err
 func (h *handlers) viewInbound(in db.Inbound, last map[int64]db.InboundEvent) InboundView {
 	info, _ := presets.Get(in.Preset)
 	v := InboundView{ID: in.ID, NodeID: in.NodeID, Name: in.Name, Preset: in.Preset, Title: info.Title, Port: in.Port, Enabled: in.Enabled != 0,
-		DisplayName: in.DisplayName, SubName: subs.ProxyName(in), Config: in.Config, Status: "unknown", UpdatedAt: time.Unix(in.UpdatedAt, 0).UTC(),
-		AutoPort: in.AutoPort != 0, AutoSNI: in.AutoSni != 0, Outbound: in.Outbound}
+		DisplayName: in.DisplayName, SubName: domain.ProxyName(in), Config: in.Config, Status: "unknown", UpdatedAt: time.Unix(in.UpdatedAt, 0).UTC(),
+		AutoPort: in.AutoPort != 0, AutoSNI: in.AutoSni != 0, Outbound: in.Outbound, Listen: in.Listen}
+	if in.PoolID.Valid {
+		id := in.PoolID.Int64
+		v.PoolID = &id
+	}
+	if in.ExitNodeID.Valid {
+		id := in.ExitNodeID.Int64
+		v.Outbound, v.ExitNodeID = "node", &id
+	}
 	if e, ok := last[in.ID]; ok {
 		v.Auto.Last = &AutoEvent{Kind: e.Kind, Old: e.OldValue, New: e.NewValue, Reason: e.Reason, At: time.Unix(e.CreatedAt, 0).UTC()}
 	}
@@ -170,9 +196,15 @@ func (h *handlers) viewInbound(in db.Inbound, last map[int64]db.InboundEvent) In
 			v.Apps = append(v.Apps, string(f))
 		}
 		v.Dest, v.ServerNames = presets.Dest(t)
+		c := t.Ext().Client
+		v.Client, v.ClientSNI = ClientEndpoint{Server: c.Server, Port: c.Port, SNI: c.SNI}, proto.ClientSNI(t)
 		if proto.UsesFingerprint(t) {
-			fp := t.Ext().Client.Fingerprint
+			fp := c.Fingerprint
 			v.Fingerprint = &fp
+		}
+		if t.Type() == "hysteria2" {
+			obfs := proto.Obfs(t)
+			v.Obfs = &obfs
 		}
 		if in.Preset == presets.Custom {
 			v.Title = t.Type()
@@ -208,50 +240,6 @@ func (h *handlers) listInbounds(ctx context.Context, _ *struct{}) (*inboundsOutp
 	return out, nil
 }
 
-// checkConfig parses and validates a template: mikan's rules first, then mihomo's own
-// parser on the node, so a broken template never replaces a working listener.
-func (h *handlers) checkConfig(ctx context.Context, node db.Node, config, port string) (proto.Template, error) {
-	t, err := proto.Parse(config)
-	if err == nil {
-		var panelPort int
-		// Only the panel's own node can use the panel as its REALITY target.
-		if node.Address == "" {
-			if panelPort, _, err = settings.Get[int](ctx, h.d.Settings, settings.KeyPanelPort); err != nil {
-				return nil, err
-			}
-		}
-		err = proto.Validate(t, proto.Options{SelfStealPort: panelPort})
-		// Checked here, not in proto.Validate: nodes keep applying templates saved before.
-		if fp := t.Ext().Client.Fingerprint; err == nil && fp != "" && !proto.ValidFingerprint(fp) {
-			err = &proto.Error{Code: "config_fingerprint", Field: "mikan.client.fingerprint", Detail: fp}
-		}
-		if err == nil && h.d.Nodes != nil {
-			err = h.d.Nodes.Validate(ctx, node.ID, nodeapi.ValidateRequest{Inbound: nodeapi.Inbound{Name: "validate", Port: port, Config: t.JSON()}, SelfStealPort: panelPort})
-			// The node validates again on apply; when it is down, saving still works.
-			if errors.Is(err, nodeapi.ErrUnavailable) {
-				err = nil
-			}
-		}
-	}
-	if err == nil {
-		return t, nil
-	}
-	var pe *proto.Error
-	if errors.As(err, &pe) {
-		value := pe.Field
-		if pe.Detail != "" {
-			value = pe.Detail
-		}
-		return nil, huma.Error422UnprocessableEntity("invalid_config", &huma.ErrorDetail{Location: "body.config", Message: pe.Code, Value: value})
-	}
-	var ne *nodeapi.Error
-	if errors.As(err, &ne) {
-		return nil, huma.Error422UnprocessableEntity("invalid_config", &huma.ErrorDetail{Location: "body.config", Message: "config_mihomo", Value: ne.Message})
-	}
-	return nil, err
-}
-
-// network of a stored inbound; two listeners may share a port only on different networks.
 func (h *handlers) validateInbound(ctx context.Context, in *validateInboundInput) (*validateInboundOutput, error) {
 	port := in.Body.Port
 	if port == "" {
@@ -261,9 +249,9 @@ func (h *handlers) validateInbound(ctx context.Context, in *validateInboundInput
 	if err != nil {
 		return nil, err
 	}
-	t, err := h.checkConfig(ctx, node, in.Body.Config, port)
+	t, err := h.d.Inbounds.CheckTemplate(ctx, node, in.Body.Config, port)
 	if err != nil {
-		return nil, err
+		return nil, configError(err)
 	}
 	out := &validateInboundOutput{}
 	out.Body.Type, out.Body.Network = t.Type(), t.Network()
@@ -271,215 +259,59 @@ func (h *handlers) validateInbound(ctx context.Context, in *validateInboundInput
 }
 
 func (h *handlers) createInbound(ctx context.Context, in *createInboundInput) (*inboundOutput, error) {
-	info, ok := presets.Get(in.Body.Preset)
-	if !ok {
-		return nil, huma.Error422UnprocessableEntity("unknown_preset")
-	}
-	node, err := h.nodeOf(ctx, in.Body.NodeID)
+	b := in.Body
+	row, err := h.d.Inbounds.Create(ctx, domain.NewInbound{NodeID: b.NodeID, Preset: b.Preset, Port: b.Port, Dest: b.Dest, Config: b.Config})
 	if err != nil {
-		return nil, err
+		return nil, inboundError(err, false)
 	}
-	port := in.Body.Port
-	if port == "" {
-		port = info.Port
-	}
-	if !domain.ValidPort(port) {
-		return nil, huma.Error422UnprocessableEntity("bad_port", &huma.ErrorDetail{Location: "body.port", Message: "bad_port"})
-	}
-	config := in.Body.Config
-	if info.ID != presets.Custom {
-		if config, err = presets.NewConfig(info.ID, in.Body.Dest); err != nil {
-			return nil, err
-		}
-	}
-	t, err := h.checkConfig(ctx, node, config, port)
-	if err != nil {
-		return nil, err
-	}
-	all, err := h.d.Store.Q.ListInbounds(ctx)
-	if err != nil {
-		return nil, err
-	}
-	existing := domain.NodeInbounds(all, node.ID)
-	base := info.Name
-	if info.ID == presets.Custom {
-		base = t.Type()
-	}
-	if owner, busy := domain.PortOwner(existing, port, t.Network(), 0); busy {
-		return nil, huma.Error409Conflict("port_in_use", &huma.ErrorDetail{Location: "body.port", Message: "port_in_use", Value: owner.Name})
-	}
-	name := domain.FreeName(existing, base)
-	now := h.d.Now().Unix()
-	row, err := h.d.Store.Q.CreateInbound(ctx, db.CreateInboundParams{NodeID: node.ID, Name: name, Preset: info.ID, Port: port, Config: config, CreatedAt: now, UpdatedAt: now})
-	if err != nil {
-		return nil, err
-	}
+	v := h.viewInbound(row, nil)
 	h.d.Changes.SlotsChanged()
-	h.audit(ctx, sessionOf(ctx).AdminID, "inbound.create", "inbound", name, map[string]any{"preset": info.ID, "type": t.Type(), "port": port})
-	return &inboundOutput{Body: h.viewInbound(row, nil)}, nil
-}
-
-func flag(on bool) int64 {
-	if on {
-		return 1
-	}
-	return 0
+	h.audit(ctx, sessionOf(ctx).AdminID, "inbound.create", "inbound", row.Name, map[string]any{"preset": row.Preset, "type": v.Type, "port": row.Port})
+	return &inboundOutput{Body: v}, nil
 }
 
 func (h *handlers) updateInbound(ctx context.Context, in *patchInboundInput) (*inboundOutput, error) {
-	row, err := h.d.Store.Q.GetInbound(ctx, in.ID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, huma.Error404NotFound("not_found")
-	}
-	if err != nil {
-		return nil, err
-	}
 	b := in.Body
-	autoPort, autoSNI := row.AutoPort, row.AutoSni
-	if b.AutoPort != nil {
-		autoPort = flag(*b.AutoPort)
-	}
-	if b.AutoSNI != nil {
-		autoSNI = flag(*b.AutoSNI)
-	}
-	autoChanged := autoPort != row.AutoPort || autoSNI != row.AutoSni
-	// The way out is the node's business: clients get nothing new either.
-	if b.Outbound != nil && *b.Outbound != row.Outbound {
-		if err := h.d.Store.Q.SetInboundOutbound(ctx, db.SetInboundOutboundParams{Outbound: *b.Outbound, ID: row.ID}); err != nil {
-			return nil, err
-		}
-		row.Outbound = *b.Outbound
-		h.d.Changes.SlotsChanged()
-		h.audit(ctx, sessionOf(ctx).AdminID, "inbound.outbound", "inbound", row.Name, map[string]any{"outbound": row.Outbound})
-	}
-	if b.Port == nil && b.Enabled == nil && b.Config == nil && b.Dest == nil && b.Fingerprint == nil && b.DisplayName == nil {
-		// Only the automatic-move switches: clients get nothing new, so updated_at stays
-		// and the block detector keeps trusting their profiles.
-		if autoChanged {
-			if err := h.d.Store.Q.SetInboundAuto(ctx, db.SetInboundAutoParams{AutoPort: autoPort, AutoSni: autoSNI, ID: row.ID}); err != nil {
-				return nil, err
-			}
-			h.audit(ctx, sessionOf(ctx).AdminID, "inbound.auto", "inbound", row.Name, map[string]any{"auto_port": autoPort != 0, "auto_sni": autoSNI != 0})
-		}
-		row.AutoPort, row.AutoSni = autoPort, autoSNI
-		last, err := h.lastAuto(ctx)
-		if err != nil {
-			return nil, err
-		}
-		return &inboundOutput{Body: h.viewInbound(row, last)}, nil
-	}
-	port, enabled, config, display := row.Port, row.Enabled, row.Config, row.DisplayName
-	if b.Port != nil {
-		if !domain.ValidPort(*b.Port) {
-			return nil, huma.Error422UnprocessableEntity("bad_port", &huma.ErrorDetail{Location: "body.port", Message: "bad_port"})
-		}
-		port = *b.Port
-	}
-	if b.Enabled != nil {
-		enabled = 0
-		if *b.Enabled {
-			enabled = 1
-		}
-	}
-	if b.Config != nil {
-		config = *b.Config
-	}
-	if b.Dest != nil {
-		t, err := proto.Parse(config)
-		if err == nil {
-			sni := ""
-			if b.ServerName != nil {
-				sni = strings.TrimSpace(*b.ServerName)
-			}
-			err = presets.SetDest(t, strings.TrimSpace(*b.Dest), sni)
-		}
-		var pe *proto.Error
-		if errors.As(err, &pe) {
-			return nil, huma.Error422UnprocessableEntity("bad_dest", &huma.ErrorDetail{Location: "body.dest", Message: pe.Code})
-		}
-		if err != nil {
-			return nil, err
-		}
-		config = proto.Marshal(t)
-	}
-	if b.Fingerprint != nil {
-		t, err := proto.Parse(config)
-		if err == nil && !proto.UsesFingerprint(t) {
-			err = &proto.Error{Code: "fingerprint_no_tls", Field: "mikan.client.fingerprint"}
-		}
-		if err == nil {
-			err = proto.SetFingerprint(t, strings.TrimSpace(*b.Fingerprint))
-		}
-		var pe *proto.Error
-		if errors.As(err, &pe) {
-			return nil, huma.Error422UnprocessableEntity("bad_fingerprint", &huma.ErrorDetail{Location: "body.fingerprint", Message: pe.Code})
-		}
-		if err != nil {
-			return nil, err
-		}
-		config = proto.Marshal(t)
-	}
+	// How a name may look is the subscription's rule; that it is free, the domain's.
 	if b.DisplayName != nil {
-		display = strings.TrimSpace(*b.DisplayName)
-	}
-	node, err := h.nodeOf(ctx, row.NodeID)
-	if err != nil {
-		return nil, err
-	}
-	t, err := h.checkConfig(ctx, node, config, port)
-	if err != nil {
-		if b.Dest != nil {
-			// The simple form edits dest only; report the error on that field.
-			var he huma.StatusError
-			if errors.As(err, &he) {
-				return nil, huma.Error422UnprocessableEntity("bad_dest", &huma.ErrorDetail{Location: "body.dest", Message: detailCode(err)})
+		if name := strings.TrimSpace(*b.DisplayName); name != "" {
+			if code := h.checkSubName(ctx, name); code != "" {
+				return nil, huma.Error422UnprocessableEntity("bad_name", &huma.ErrorDetail{Location: "body.display_name", Message: code})
 			}
 		}
-		return nil, err
 	}
-	all, err := h.d.Store.Q.ListInbounds(ctx)
+	p := domain.InboundPatch{Port: b.Port, Enabled: b.Enabled, Config: b.Config, Dest: b.Dest, ServerName: b.ServerName, Fingerprint: b.Fingerprint, Obfs: b.Obfs,
+		DisplayName: b.DisplayName, Listen: b.Listen, AutoPort: b.AutoPort, AutoSNI: b.AutoSNI, Outbound: b.Outbound, ExitNodeID: b.ExitNodeID, PoolID: b.PoolID}
+	if c := b.Client; c != nil {
+		// The address clients connect to: like the panel's public host, not for a key.
+		if err := requireSession(ctx, "client"); err != nil {
+			return nil, err
+		}
+		p.Client = &domain.ClientEndpoint{Server: c.Server, Port: c.Port, SNI: c.SNI}
+	}
+	prev, row, err := h.d.Inbounds.Update(ctx, in.ID, p)
 	if err != nil {
-		return nil, err
+		return nil, inboundError(err, b.Dest != nil)
 	}
-	// Ports and names are per node: other nodes' links get their own flag prefix.
-	existing := domain.NodeInbounds(all, row.NodeID)
-	next := row
-	next.DisplayName = display
-	if owner, busy := domain.PortOwner(existing, port, t.Network(), row.ID); busy && enabled != 0 {
-		return nil, huma.Error409Conflict("port_in_use", &huma.ErrorDetail{Location: "body.port", Message: "port_in_use", Value: owner.Name})
+	admin := sessionOf(ctx).AdminID
+	if b.PoolID != nil {
+		h.d.Changes.PoliciesChanged()
+		h.audit(ctx, admin, "inbound.pool", "inbound", row.Name, map[string]any{"pool_id": row.PoolID.Int64})
 	}
-	for _, e := range existing {
-		if e.ID == row.ID {
-			continue
-		}
-		if b.DisplayName != nil && strings.EqualFold(subs.ProxyName(e), subs.ProxyName(next)) {
-			return nil, huma.Error409Conflict("name_in_use", &huma.ErrorDetail{Location: "body.display_name", Message: "name_in_use", Value: e.Name})
-		}
+	if b.Outbound != nil {
+		h.audit(ctx, admin, "inbound.outbound", "inbound", row.Name, map[string]any{"outbound": *b.Outbound, "exit_node_id": row.ExitNodeID.Int64})
 	}
-	if b.DisplayName != nil && display != "" {
-		if code := h.checkSubName(ctx, display); code != "" {
-			return nil, huma.Error422UnprocessableEntity("bad_name", &huma.ErrorDetail{Location: "body.display_name", Message: code})
-		}
+	moved := row.Listen != prev.Listen
+	switch {
+	case p.ForClients():
+		h.audit(ctx, admin, "inbound.update", "inbound", row.Name, map[string]any{"config_changed": p.EditsTemplate(),
+			"listen": row.Listen, "auto_port": row.AutoPort != 0, "auto_sni": row.AutoSni != 0})
+	case moved || row.AutoPort != prev.AutoPort || row.AutoSni != prev.AutoSni:
+		h.audit(ctx, admin, "inbound.auto", "inbound", row.Name, map[string]any{"listen": row.Listen, "auto_port": row.AutoPort != 0, "auto_sni": row.AutoSni != 0})
 	}
-	err = h.d.Store.Tx(ctx, func(q *db.Queries) error {
-		var err error
-		if row, err = q.UpdateInbound(ctx, db.UpdateInboundParams{Port: port, Enabled: enabled, Config: config, DisplayName: display, UpdatedAt: h.d.Now().Unix(), ID: in.ID}); err != nil {
-			return err
-		}
-		if autoChanged {
-			if err := q.SetInboundAuto(ctx, db.SetInboundAutoParams{AutoPort: autoPort, AutoSni: autoSNI, ID: row.ID}); err != nil {
-				return err
-			}
-			row.AutoPort, row.AutoSni = autoPort, autoSNI
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
+	if p.ForClients() || moved || b.PoolID != nil || b.Outbound != nil {
+		h.d.Changes.SlotsChanged()
 	}
-	h.d.Changes.SlotsChanged()
-	h.audit(ctx, sessionOf(ctx).AdminID, "inbound.update", "inbound", row.Name, map[string]any{"config_changed": b.Config != nil || b.Dest != nil || b.Fingerprint != nil,
-		"auto_port": row.AutoPort != 0, "auto_sni": row.AutoSni != 0})
 	last, err := h.lastAuto(ctx)
 	if err != nil {
 		return nil, err
@@ -487,13 +319,84 @@ func (h *handlers) updateInbound(ctx context.Context, in *patchInboundInput) (*i
 	return &inboundOutput{Body: h.viewInbound(row, last)}, nil
 }
 
-// detailCode pulls the first error code out of a huma error built by checkConfig.
-func detailCode(err error) string {
-	var m *huma.ErrorModel
-	if errors.As(err, &m) && len(m.Errors) > 0 {
-		return m.Errors[0].Message
+// inboundError maps the domain's refusals of an inbound change to the API's codes. dest:
+// the request set the REALITY target, and the simple form that does shows the
+// template's errors on that field.
+func inboundError(err error, dest bool) error {
+	var edit *domain.EditError
+	var name *domain.NameInUseError
+	var pe *proto.Error
+	var ne *nodeapi.Error
+	switch {
+	case errors.Is(err, domain.ErrUnknownInbound):
+		return huma.Error404NotFound("not_found")
+	case errors.Is(err, domain.ErrUnknownPreset):
+		return huma.Error422UnprocessableEntity("unknown_preset")
+	case errors.Is(err, domain.ErrUnknownNode):
+		return huma.Error422UnprocessableEntity("unknown_node", &huma.ErrorDetail{Location: "body.node_id", Message: "unknown_node"})
+	case errors.Is(err, domain.ErrBadPort):
+		return huma.Error422UnprocessableEntity("bad_port", &huma.ErrorDetail{Location: "body.port", Message: "bad_port"})
+	case errors.Is(err, domain.ErrBadListen):
+		return huma.Error422UnprocessableEntity("bad_listen", &huma.ErrorDetail{Location: "body.listen", Message: "bad_listen"})
+	case errors.Is(err, domain.ErrAutoPortListen):
+		return huma.Error422UnprocessableEntity("auto_port_listen", &huma.ErrorDetail{Location: "body.auto_port", Message: "auto_port_listen"})
+	case errors.Is(err, domain.ErrInboundChanged):
+		return huma.Error409Conflict("inbound_changed")
+	case errors.Is(err, domain.ErrUnknownPool):
+		return huma.Error422UnprocessableEntity("validation", &huma.ErrorDetail{Location: "body.pool_id", Message: "pool_not_found"})
+	case errors.As(err, &name):
+		return huma.Error409Conflict("name_in_use", &huma.ErrorDetail{Location: "body.display_name", Message: "name_in_use", Value: name.Owner})
+	case errors.As(err, &edit):
+		// The client endpoint names its part: body.client.sni.
+		location := "body." + edit.Field
+		if part, ok := strings.CutPrefix(edit.Err.Field, "mikan.client."); ok && edit.Field == "client" {
+			location += "." + part
+		}
+		return huma.Error422UnprocessableEntity("bad_"+edit.Field, &huma.ErrorDetail{Location: location, Message: edit.Err.Code})
+	case dest && errors.As(err, &pe):
+		return huma.Error422UnprocessableEntity("bad_dest", &huma.ErrorDetail{Location: "body.dest", Message: pe.Code})
+	case dest && errors.As(err, &ne):
+		return huma.Error422UnprocessableEntity("bad_dest", &huma.ErrorDetail{Location: "body.dest", Message: "config_mihomo"})
 	}
-	return "invalid_config"
+	return configError(portError(cascadeError(err, "exit_node_id")))
+}
+
+// configError maps a template's refusal, mikan's own or the node's mihomo's, to the
+// API's code; other errors pass through.
+func configError(err error) error {
+	var pe *proto.Error
+	if errors.As(err, &pe) {
+		value := pe.Field
+		if pe.Detail != "" {
+			value = pe.Detail
+		}
+		return huma.Error422UnprocessableEntity("invalid_config", &huma.ErrorDetail{Location: "body.config", Message: pe.Code, Value: value})
+	}
+	var ne *nodeapi.Error
+	if errors.As(err, &ne) {
+		return huma.Error422UnprocessableEntity("invalid_config", &huma.ErrorDetail{Location: "body.config", Message: "config_mihomo", Value: ne.Message})
+	}
+	return err
+}
+
+// portError is how the API reports a port something else holds; other errors pass
+// through.
+func portError(err error) error {
+	var busy *domain.PortInUseError
+	if !errors.As(err, &busy) {
+		return err
+	}
+	switch busy.Kind {
+	case domain.PortRelay:
+		return huma.Error409Conflict("port_in_use", &huma.ErrorDetail{Location: "body.port", Message: "port_relay"})
+	case domain.PortSub:
+		return huma.Error409Conflict("port_in_use", &huma.ErrorDetail{Location: "body.port", Message: "port_sub"})
+	case domain.PortPanel:
+		return huma.Error409Conflict("port_in_use", &huma.ErrorDetail{Location: "body.port", Message: "port_panel"})
+	case domain.PortNodeAPI:
+		return huma.Error409Conflict("port_in_use", &huma.ErrorDetail{Location: "body.port", Message: "port_node_api"})
+	}
+	return huma.Error409Conflict("port_in_use", &huma.ErrorDetail{Location: "body.port", Message: "port_in_use", Value: busy.Name})
 }
 
 func (h *handlers) deleteInbound(ctx context.Context, in *userIDInput) (*struct{}, error) {

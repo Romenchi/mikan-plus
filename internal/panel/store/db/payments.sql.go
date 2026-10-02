@@ -10,10 +10,26 @@ import (
 	"database/sql"
 )
 
+const countRecentInvoices = `-- name: CountRecentInvoices :one
+SELECT count(*) FROM payments WHERE tg_id = ? AND status IN ('pending', 'paid') AND created_at > ?
+`
+
+type CountRecentInvoicesParams struct {
+	TgID      int64
+	CreatedAt int64
+}
+
+func (q *Queries) CountRecentInvoices(ctx context.Context, arg CountRecentInvoicesParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countRecentInvoices, arg.TgID, arg.CreatedAt)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createPayment = `-- name: CreatePayment :one
 INSERT INTO payments (provider, payload, tg_id, kind, user_id, tariff_id, tariff_name, amount, currency, status, created_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
-RETURNING id, provider, payload, external_id, tg_id, kind, user_id, tariff_id, tariff_name, amount, currency, status, error, pay_url, created_at, paid_at, applied_at, refunded_at
+RETURNING id, provider, payload, external_id, tg_id, kind, user_id, tariff_id, package_id, tariff_name, amount, currency, status, error, pay_url, created_at, paid_at, applied_at, refunded_at
 `
 
 type CreatePaymentParams struct {
@@ -22,7 +38,7 @@ type CreatePaymentParams struct {
 	TgID       int64
 	Kind       string
 	UserID     sql.NullInt64
-	TariffID   int64
+	TariffID   sql.NullInt64
 	TariffName string
 	Amount     int64
 	Currency   string
@@ -52,6 +68,7 @@ func (q *Queries) CreatePayment(ctx context.Context, arg CreatePaymentParams) (P
 		&i.Kind,
 		&i.UserID,
 		&i.TariffID,
+		&i.PackageID,
 		&i.TariffName,
 		&i.Amount,
 		&i.Currency,
@@ -79,7 +96,7 @@ func (q *Queries) ExpirePayments(ctx context.Context, createdAt int64) (int64, e
 }
 
 const findOpenPayment = `-- name: FindOpenPayment :one
-SELECT id, provider, payload, external_id, tg_id, kind, user_id, tariff_id, tariff_name, amount, currency, status, error, pay_url, created_at, paid_at, applied_at, refunded_at FROM payments
+SELECT id, provider, payload, external_id, tg_id, kind, user_id, tariff_id, package_id, tariff_name, amount, currency, status, error, pay_url, created_at, paid_at, applied_at, refunded_at FROM payments
 WHERE tg_id = ? AND tariff_id = ? AND provider = ? AND kind = ? AND IFNULL(user_id, 0) = ?5
   AND status = 'pending' AND pay_url <> '' AND created_at > ?6
 ORDER BY id DESC LIMIT 1
@@ -87,7 +104,7 @@ ORDER BY id DESC LIMIT 1
 
 type FindOpenPaymentParams struct {
 	TgID     int64
-	TariffID int64
+	TariffID sql.NullInt64
 	Provider string
 	Kind     string
 	UserID   sql.NullInt64
@@ -113,6 +130,7 @@ func (q *Queries) FindOpenPayment(ctx context.Context, arg FindOpenPaymentParams
 		&i.Kind,
 		&i.UserID,
 		&i.TariffID,
+		&i.PackageID,
 		&i.TariffName,
 		&i.Amount,
 		&i.Currency,
@@ -128,7 +146,7 @@ func (q *Queries) FindOpenPayment(ctx context.Context, arg FindOpenPaymentParams
 }
 
 const getPayment = `-- name: GetPayment :one
-SELECT id, provider, payload, external_id, tg_id, kind, user_id, tariff_id, tariff_name, amount, currency, status, error, pay_url, created_at, paid_at, applied_at, refunded_at FROM payments WHERE id = ?
+SELECT id, provider, payload, external_id, tg_id, kind, user_id, tariff_id, package_id, tariff_name, amount, currency, status, error, pay_url, created_at, paid_at, applied_at, refunded_at FROM payments WHERE id = ?
 `
 
 func (q *Queries) GetPayment(ctx context.Context, id int64) (Payment, error) {
@@ -143,6 +161,7 @@ func (q *Queries) GetPayment(ctx context.Context, id int64) (Payment, error) {
 		&i.Kind,
 		&i.UserID,
 		&i.TariffID,
+		&i.PackageID,
 		&i.TariffName,
 		&i.Amount,
 		&i.Currency,
@@ -158,7 +177,7 @@ func (q *Queries) GetPayment(ctx context.Context, id int64) (Payment, error) {
 }
 
 const getPaymentByExternal = `-- name: GetPaymentByExternal :one
-SELECT id, provider, payload, external_id, tg_id, kind, user_id, tariff_id, tariff_name, amount, currency, status, error, pay_url, created_at, paid_at, applied_at, refunded_at FROM payments WHERE provider = ? AND external_id = ?
+SELECT id, provider, payload, external_id, tg_id, kind, user_id, tariff_id, package_id, tariff_name, amount, currency, status, error, pay_url, created_at, paid_at, applied_at, refunded_at FROM payments WHERE provider = ? AND external_id = ?
 `
 
 type GetPaymentByExternalParams struct {
@@ -178,6 +197,7 @@ func (q *Queries) GetPaymentByExternal(ctx context.Context, arg GetPaymentByExte
 		&i.Kind,
 		&i.UserID,
 		&i.TariffID,
+		&i.PackageID,
 		&i.TariffName,
 		&i.Amount,
 		&i.Currency,
@@ -193,7 +213,7 @@ func (q *Queries) GetPaymentByExternal(ctx context.Context, arg GetPaymentByExte
 }
 
 const getPaymentByPayload = `-- name: GetPaymentByPayload :one
-SELECT id, provider, payload, external_id, tg_id, kind, user_id, tariff_id, tariff_name, amount, currency, status, error, pay_url, created_at, paid_at, applied_at, refunded_at FROM payments WHERE payload = ?
+SELECT id, provider, payload, external_id, tg_id, kind, user_id, tariff_id, package_id, tariff_name, amount, currency, status, error, pay_url, created_at, paid_at, applied_at, refunded_at FROM payments WHERE payload = ?
 `
 
 func (q *Queries) GetPaymentByPayload(ctx context.Context, payload string) (Payment, error) {
@@ -208,6 +228,7 @@ func (q *Queries) GetPaymentByPayload(ctx context.Context, payload string) (Paym
 		&i.Kind,
 		&i.UserID,
 		&i.TariffID,
+		&i.PackageID,
 		&i.TariffName,
 		&i.Amount,
 		&i.Currency,
@@ -222,12 +243,12 @@ func (q *Queries) GetPaymentByPayload(ctx context.Context, payload string) (Paym
 	return i, err
 }
 
-const listOpenPayments = `-- name: ListOpenPayments :many
-SELECT id, provider, payload, external_id, tg_id, kind, user_id, tariff_id, tariff_name, amount, currency, status, error, pay_url, created_at, paid_at, applied_at, refunded_at FROM payments WHERE status IN ('pending', 'paid') AND created_at > ? ORDER BY id
+const listPaidPayments = `-- name: ListPaidPayments :many
+SELECT id, provider, payload, external_id, tg_id, kind, user_id, tariff_id, package_id, tariff_name, amount, currency, status, error, pay_url, created_at, paid_at, applied_at, refunded_at FROM payments WHERE status = 'paid' ORDER BY id
 `
 
-func (q *Queries) ListOpenPayments(ctx context.Context, createdAt int64) ([]Payment, error) {
-	rows, err := q.db.QueryContext(ctx, listOpenPayments, createdAt)
+func (q *Queries) ListPaidPayments(ctx context.Context) ([]Payment, error) {
+	rows, err := q.db.QueryContext(ctx, listPaidPayments)
 	if err != nil {
 		return nil, err
 	}
@@ -244,6 +265,7 @@ func (q *Queries) ListOpenPayments(ctx context.Context, createdAt int64) ([]Paym
 			&i.Kind,
 			&i.UserID,
 			&i.TariffID,
+			&i.PackageID,
 			&i.TariffName,
 			&i.Amount,
 			&i.Currency,
@@ -269,12 +291,15 @@ func (q *Queries) ListOpenPayments(ctx context.Context, createdAt int64) ([]Paym
 }
 
 const listPayments = `-- name: ListPayments :many
-SELECT id, provider, payload, external_id, tg_id, kind, user_id, tariff_id, tariff_name, amount, currency, status, error, pay_url, created_at, paid_at, applied_at, refunded_at FROM payments
-WHERE id < ?1
-  AND (?2 = '' OR status = ?2)
-  AND (?3 = '' OR provider = ?3)
-  AND (?4 = 0 OR user_id = ?4)
-ORDER BY id DESC LIMIT ?5
+SELECT payments.id, payments.provider, payments.payload, payments.external_id, payments.tg_id, payments.kind, payments.user_id, payments.tariff_id, payments.package_id, payments.tariff_name, payments.amount, payments.currency, payments.status, payments.error, payments.pay_url, payments.created_at, payments.paid_at, payments.applied_at, payments.refunded_at, CAST(IFNULL(users.name, '') AS TEXT) AS user_name, CAST(IFNULL(tg_chats.username, '') AS TEXT) AS tg_username
+FROM payments
+LEFT JOIN users ON users.id = payments.user_id
+LEFT JOIN tg_chats ON tg_chats.tg_id = payments.tg_id
+WHERE payments.id < ?1
+  AND (?2 = '' OR payments.status = ?2)
+  AND (?3 = '' OR payments.provider = ?3)
+  AND (?4 = 0 OR payments.user_id = ?4)
+ORDER BY payments.id DESC LIMIT ?5
 `
 
 type ListPaymentsParams struct {
@@ -285,7 +310,13 @@ type ListPaymentsParams struct {
 	Lim      int64
 }
 
-func (q *Queries) ListPayments(ctx context.Context, arg ListPaymentsParams) ([]Payment, error) {
+type ListPaymentsRow struct {
+	Payment    Payment
+	UserName   string
+	TgUsername string
+}
+
+func (q *Queries) ListPayments(ctx context.Context, arg ListPaymentsParams) ([]ListPaymentsRow, error) {
 	rows, err := q.db.QueryContext(ctx, listPayments,
 		arg.BeforeID,
 		arg.Status,
@@ -293,6 +324,55 @@ func (q *Queries) ListPayments(ctx context.Context, arg ListPaymentsParams) ([]P
 		arg.UserID,
 		arg.Lim,
 	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPaymentsRow{}
+	for rows.Next() {
+		var i ListPaymentsRow
+		if err := rows.Scan(
+			&i.Payment.ID,
+			&i.Payment.Provider,
+			&i.Payment.Payload,
+			&i.Payment.ExternalID,
+			&i.Payment.TgID,
+			&i.Payment.Kind,
+			&i.Payment.UserID,
+			&i.Payment.TariffID,
+			&i.Payment.PackageID,
+			&i.Payment.TariffName,
+			&i.Payment.Amount,
+			&i.Payment.Currency,
+			&i.Payment.Status,
+			&i.Payment.Error,
+			&i.Payment.PayUrl,
+			&i.Payment.CreatedAt,
+			&i.Payment.PaidAt,
+			&i.Payment.AppliedAt,
+			&i.Payment.RefundedAt,
+			&i.UserName,
+			&i.TgUsername,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPendingPayments = `-- name: ListPendingPayments :many
+SELECT id, provider, payload, external_id, tg_id, kind, user_id, tariff_id, package_id, tariff_name, amount, currency, status, error, pay_url, created_at, paid_at, applied_at, refunded_at FROM payments WHERE status = 'pending' AND created_at > ? ORDER BY id
+`
+
+func (q *Queries) ListPendingPayments(ctx context.Context, createdAt int64) ([]Payment, error) {
+	rows, err := q.db.QueryContext(ctx, listPendingPayments, createdAt)
 	if err != nil {
 		return nil, err
 	}
@@ -309,6 +389,7 @@ func (q *Queries) ListPayments(ctx context.Context, arg ListPaymentsParams) ([]P
 			&i.Kind,
 			&i.UserID,
 			&i.TariffID,
+			&i.PackageID,
 			&i.TariffName,
 			&i.Amount,
 			&i.Currency,

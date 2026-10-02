@@ -13,6 +13,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"mikan/internal/hostname"
 	"mikan/internal/nodetls"
 	"mikan/internal/panel/audit"
 	"mikan/internal/panel/domain"
@@ -67,7 +68,12 @@ func nodeCmd(ctx context.Context, st *store.Store, dataDir string, args []string
 			return err
 		}
 		n, key, err := domain.AddNode(ctx, st, panel, domain.NodeInput{Name: *name, Host: *host, Domain: *dom, APIPort: *port}, time.Now())
-		if err != nil {
+		switch {
+		case errors.Is(err, domain.ErrBadHost):
+			return errors.New(badHost)
+		case errors.Is(err, domain.ErrBadDomain):
+			return errors.New(badDomain)
+		case err != nil:
 			return err
 		}
 		_ = audit.Write(ctx, st.Q, time.Now(), audit.Entry{Action: "cli.node_create", TargetType: "node", TargetID: strconv.FormatInt(n.ID, 10),
@@ -117,19 +123,26 @@ func nodeCmd(ctx context.Context, st *store.Store, dataDir string, args []string
 		if n.Address == "" && (*host != n.PublicHost || *dom != n.Domain) {
 			return errors.New("the panel's own node has the panel's address: change it in the panel's settings")
 		}
+		*host, *dom = strings.TrimSpace(*host), strings.TrimSpace(*dom)
+		if n.Address != "" && !hostname.Valid(*host) {
+			return errors.New(badHost)
+		}
+		if *dom != "" && !hostname.Valid(*dom) {
+			return errors.New(badDomain)
+		}
 		if n.Address != "" && *host != n.PublicHost {
 			_, port, err := net.SplitHostPort(n.Address)
 			if err != nil {
 				return err
 			}
-			n.Address = net.JoinHostPort(strings.TrimSpace(*host), port)
+			n.Address = net.JoinHostPort(*host, port)
 		}
 		on := int64(0)
 		if *enabled {
 			on = 1
 		}
-		n, err = st.Q.UpdateNode(ctx, db.UpdateNodeParams{Name: strings.TrimSpace(*name), Address: n.Address, PublicHost: strings.TrimSpace(*host),
-			Domain: strings.TrimSpace(*dom), Enabled: on, UpdatedAt: time.Now().Unix(), ID: n.ID})
+		n, err = st.Q.UpdateNode(ctx, db.UpdateNodeParams{Name: strings.TrimSpace(*name), Address: n.Address, PublicHost: *host,
+			Domain: *dom, Enabled: on, UpdatedAt: time.Now().Unix(), ID: n.ID})
 		if err != nil {
 			return err
 		}
@@ -141,6 +154,11 @@ func nodeCmd(ctx context.Context, st *store.Store, dataDir string, args []string
 		return fmt.Errorf("unknown node subcommand %q\n\n%s", args[0], usage)
 	}
 }
+
+const (
+	badHost   = "--host: want an IP address or a host name like vpn.example.com"
+	badDomain = "--domain: want a host name like vpn.example.com"
+)
 
 func nodeID(args []string) (int64, error) {
 	if len(args) < 2 {

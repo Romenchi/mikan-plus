@@ -75,6 +75,16 @@ func TestCheckInitData(t *testing.T) {
 	if _, err := CheckInitData(token, good, now.Add(InitDataTTL+time.Hour)); !errors.Is(err, ErrInitData) {
 		t.Fatalf("an old signature: %v", err)
 	}
+	// An hour, not a day: the data of a Mini App opened a minute ago is good for 59 more.
+	if _, err := CheckInitData(token, good, now.Add(InitDataTTL-2*time.Minute)); err != nil {
+		t.Fatalf("a signature within the hour: %v", err)
+	}
+	if _, err := CheckInitData(token, good, now.Add(InitDataTTL)); !errors.Is(err, ErrInitData) {
+		t.Fatalf("a signature past the hour: %v", err)
+	}
+	if InitDataTTL > time.Hour {
+		t.Fatalf("initData is good for %s", InitDataTTL)
+	}
 	if _, err := CheckInitData(token, "user=%7B%7D", now); !errors.Is(err, ErrInitData) {
 		t.Fatalf("no hash: %v", err)
 	}

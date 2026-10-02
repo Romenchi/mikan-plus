@@ -38,6 +38,14 @@ func ValidHWID(s string) bool { return hwidRe.MatchString(s) }
 // would let buyers in one after another.
 const UnbindCooldown = 24 * time.Hour
 
+// MaxDevices is how many devices a user without a limit may bind. The id is whatever the
+// client sends, and every new one takes a slot of the pool for good: holders of a link
+// could otherwise use the pool up and make the nodes rebuild their listeners.
+const MaxDevices = 50
+
+// DeviceIdle: a device not seen for this long is forgotten, and its keys burn.
+const DeviceIdle = 90 * 24 * time.Hour
+
 var (
 	ErrDeviceLimit    = errors.New("device_limit")    // the user's places are taken
 	ErrNoHWID         = errors.New("no_hwid")         // the app sends no device id and one is required
@@ -47,6 +55,9 @@ var (
 func NewDevices(st *store.Store, pool *Pool, changes Changes, now func() time.Time) *Devices {
 	return &Devices{st: st, pool: pool, changes: changes, now: now}
 }
+
+// same: what the app sent tells nothing new (it did not send it, or it is what is known).
+func same(v, old string) bool { return v == "" || v == old }
 
 // clip keeps what a client reports short and printable.
 func clip(s string, n int) string {
@@ -89,9 +100,20 @@ func (d *Devices) Bind(ctx context.Context, u db.User, in DeviceInfo, requireHWI
 	return slot, nil
 }
 
+// touchEvery: a known device that reports nothing new is written down at most this often.
+// Apps fetch the subscription every few minutes; last_seen needs no finer grain.
+const touchEvery = 5 * time.Minute
+
 func (d *Devices) bind(ctx context.Context, u db.User, hwid string, in DeviceInfo) (slot db.Slot, created bool, err error) {
 	now := d.now().Unix()
 	os, osv, model, app, ip := clip(in.OS, 40), clip(in.OSVersion, 40), clip(in.Model, 60), clip(in.App, 120), clip(in.IP, 45)
+	// The usual request: a known device, nothing new about it. Read, no write.
+	if dev, err := d.st.Q.GetBoundDevice(ctx, db.GetBoundDeviceParams{UserID: u.ID, Hwid: hwid}); err == nil &&
+		now-dev.LastSeen < int64(touchEvery/time.Second) && now >= dev.LastSeen &&
+		same(os, dev.Os) && same(osv, dev.OsVersion) && same(model, dev.Model) && same(app, dev.App) && same(ip, dev.LastIp) {
+		slot, err = d.st.Q.GetSlot(ctx, dev.SlotID)
+		return slot, false, err
+	}
 	err = d.st.Tx(ctx, func(q *db.Queries) error {
 		dev, err := q.GetBoundDevice(ctx, db.GetBoundDeviceParams{UserID: u.ID, Hwid: hwid})
 		if err == nil {
@@ -112,11 +134,25 @@ func (d *Devices) bind(ctx context.Context, u db.User, hwid string, in DeviceInf
 		if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
+		// A user who cannot connect (turned off, term over) registers no new device and takes
+		// no slot: the link itself is enough to ask, and it may be in anyone's hands. The
+		// answer is the user's own keys, which the node refuses anyway.
+		if u.Status == "disabled" || (u.ExpiresAt.Valid && d.now().Unix() >= u.ExpiresAt.Int64) {
+			if !u.SlotID.Valid {
+				return errors.New("user has no slot")
+			}
+			slot, err = q.GetSlot(ctx, u.SlotID.Int64)
+			return err
+		}
 		n, err := q.CountBoundDevices(ctx, u.ID)
 		if err != nil {
 			return err
 		}
-		if u.DeviceLimit.Valid && n >= u.DeviceLimit.Int64 {
+		limit := int64(MaxDevices)
+		if u.DeviceLimit.Valid {
+			limit = u.DeviceLimit.Int64
+		}
+		if n >= limit {
 			return ErrDeviceLimit
 		}
 		if hwid == "" {
@@ -204,6 +240,38 @@ func (d *Devices) unbind(ctx context.Context, userID, deviceID int64, bySubscrib
 		}
 		return nil
 	})
+}
+
+// ForgetIdle forgets the devices not seen for DeviceIdle and burns their keys: nobody
+// frees the places of devices that were sold, lost or reinstalled, and each took a slot of
+// the pool. It returns how many it forgot.
+func (d *Devices) ForgetIdle(ctx context.Context) (int, error) {
+	now := d.now()
+	n := 0
+	err := d.st.Tx(ctx, func(q *db.Queries) error {
+		n = 0
+		devs, err := q.ListIdleBoundDevices(ctx, now.Add(-DeviceIdle).Unix())
+		if err != nil {
+			return err
+		}
+		for _, dev := range devs {
+			// The shared place is the user's own slot: only the record goes.
+			if dev.Hwid != "" {
+				if err := q.BurnSlot(ctx, db.BurnSlotParams{BurnedAt: sql.NullInt64{Int64: now.Unix(), Valid: true}, ID: dev.SlotID}); err != nil {
+					return err
+				}
+			}
+			if err := q.DeleteBoundDevice(ctx, dev.ID); err != nil {
+				return err
+			}
+			n++
+		}
+		return nil
+	})
+	if err == nil && n > 0 {
+		d.changes.PoliciesChanged()
+	}
+	return n, err
 }
 
 // NextUnbind is when the subscriber may unbind a device again (zero: now).

@@ -1,0 +1,33 @@
+# Hosts the panel (internal/hostname) and the installer (valid_domain in
+# installer/src/net.rs) judge alike. One per line: the verdict, a space, the host.
+#   name  a DNS name: Name and Valid accept it, and so does the installer
+#   ip    an IP address: Valid accepts it, Name and the installer do not
+#   bad   neither
+name vpn.example.com
+name a-b.example.co.uk
+name xn--80ak6aa92e.com
+name VPN.Example.COM
+name a.io
+name 1st.example.net
+name 123.example.com
+name aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example.com
+ip 1.2.3.4
+ip 203.0.113.10
+ip 2001:db8::1
+ip ::1
+bad example
+bad localhost
+bad vpn.example.123
+bad 1.2.3
+bad -a.example.com
+bad a-.example.com
+bad a..example.com
+bad .example.com
+bad example.com.
+bad a_b.example.com
+bad vpn example.com
+bad vpn.example.com:443
+bad https://vpn.example.com
+bad пример.рф
+bad aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example.com
+bad 1.2.3.4/32

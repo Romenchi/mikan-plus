@@ -68,8 +68,12 @@ func (h *handlers) overview(ctx context.Context, _ *struct{}) (*overviewOutput, 
 	b := &out.Body
 	b.GeneratedAt = now.UTC()
 	b.UsersTotal = len(users)
+	grants, err := domain.LoadGrantsLeft(ctx, h.d.Store.Q, now)
+	if err != nil {
+		return nil, err
+	}
 	for _, u := range users {
-		switch domain.State(u, now) {
+		switch domain.State(u, grants.Main(u.ID), now) {
 		case domain.StateActive:
 			b.UsersActive++
 		case domain.StateExpiring:
@@ -79,7 +83,7 @@ func (h *handlers) overview(ctx context.Context, _ *struct{}) (*overviewOutput, 
 	}
 	if h.d.Online != nil {
 		// Online counts users: one with several bound devices has several slots online.
-		slots, err := h.userSlots(ctx)
+		slots, err := h.allUserSlots(ctx)
 		if err != nil {
 			return nil, err
 		}

@@ -1,11 +1,13 @@
+import clsx from "clsx";
+
 /**
  * The backdrop behind the glass, "dawn": warm light from the left — mandarin, rose,
  * honey — and cool from the right — lilac, sky. The two drift apart slowly; paper grain
- * on top.
+ * on top. `calm` keeps it still (the subscription page, see .atmo.calm in app.css).
  */
-export function Atmosphere() {
+export function Atmosphere({ calm }: { calm?: boolean }) {
   return (
-    <div className="atmo" aria-hidden>
+    <div className={clsx("atmo", calm && "calm")} aria-hidden>
       <span className="glow glow-warm" />
       <span className="glow glow-cool" />
       <span className="grain" />

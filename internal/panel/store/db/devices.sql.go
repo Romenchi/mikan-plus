@@ -217,19 +217,43 @@ func (q *Queries) ListDeviceSlots(ctx context.Context) ([]ListDeviceSlotsRow, er
 	return items, nil
 }
 
-const setUserBillingDay = `-- name: SetUserBillingDay :exec
-UPDATE users SET billing_day = ?, updated_at = ? WHERE id = ?
+const listIdleBoundDevices = `-- name: ListIdleBoundDevices :many
+SELECT id, user_id, hwid, slot_id, os, os_version, model, app, last_ip, created_at, last_seen FROM bound_devices WHERE last_seen < ?
 `
 
-type SetUserBillingDayParams struct {
-	BillingDay sql.NullInt64
-	UpdatedAt  int64
-	ID         int64
-}
-
-func (q *Queries) SetUserBillingDay(ctx context.Context, arg SetUserBillingDayParams) error {
-	_, err := q.db.ExecContext(ctx, setUserBillingDay, arg.BillingDay, arg.UpdatedAt, arg.ID)
-	return err
+func (q *Queries) ListIdleBoundDevices(ctx context.Context, lastSeen int64) ([]BoundDevice, error) {
+	rows, err := q.db.QueryContext(ctx, listIdleBoundDevices, lastSeen)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []BoundDevice{}
+	for rows.Next() {
+		var i BoundDevice
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Hwid,
+			&i.SlotID,
+			&i.Os,
+			&i.OsVersion,
+			&i.Model,
+			&i.App,
+			&i.LastIp,
+			&i.CreatedAt,
+			&i.LastSeen,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const setUserSlot = `-- name: SetUserSlot :exec

@@ -142,24 +142,12 @@ func netOf(ip string) string {
 	return p.String()
 }
 
-// Pool is where a blocked inbound moves: ports HTTPS also runs on (the alternative ports
-// of CDNs), so the traffic still looks like a web server's. The installer opens them in
-// the firewall.
-var Pool = []int{2053, 2083, 2087, 2096, 2443, 3443, 4443, 5443, 6443, 7443, 8443, 9443}
-
-// FreePorts returns the pool ports an inbound of the node may move to on network: not
-// used by another inbound there (enabled or not), not reserved, not given up lately.
-func FreePorts(nodeInbounds []db.Inbound, network string, reserved, abandoned map[string]bool) []string {
+// FreePorts returns the ports of domain.PortPool a blocked inbound of the node may move
+// to on network: free on the node's port map and not given up lately.
+func FreePorts(ports domain.PortMap, network string, abandoned map[string]bool) []string {
 	var out []string
-	for _, p := range Pool {
-		port := strconv.Itoa(p)
-		if reserved[port] || abandoned[port] {
-			continue
-		}
-		taken := slices.ContainsFunc(nodeInbounds, func(in db.Inbound) bool {
-			return in.Port == port && domain.InboundNetwork(in) == network
-		})
-		if !taken {
+	for _, p := range domain.PortPool {
+		if port := strconv.Itoa(p); !abandoned[port] && ports.Free(p, network) {
 			out = append(out, port)
 		}
 	}

@@ -61,7 +61,10 @@ func sum(secret, b []byte) []byte {
 // signed with a key derived from the bot token.
 
 // InitDataTTL: an older signature is not accepted (Telegram's own advice: check auth_date).
-const InitDataTTL = 24 * time.Hour
+// initData travels in the Mini App's address and in every request it makes, so it ends up
+// in histories and logs: what it opens must not stay open for a day. The Mini App asks for
+// its session when it opens; one left open for longer has to be opened again.
+const InitDataTTL = time.Hour
 
 var ErrInitData = errors.New("init_data")
 

@@ -29,7 +29,7 @@ func warpState() nodeapi.DesiredState {
 // value split a rule; mihomo's own parser takes the result.
 func TestWarpConfig(t *testing.T) {
 	st := warpState()
-	raw, err := buildConfig(st, proto.Cert{CertPath: "/tmp/c.pem", KeyPath: "/tmp/k.pem"}, false)
+	raw, _, err := buildConfig(st, proto.Cert{CertPath: "/tmp/c.pem", KeyPath: "/tmp/k.pem"}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,13 +72,13 @@ func TestWarpConfig(t *testing.T) {
 
 	// Without WARP nothing of it remains; a broken endpoint is refused.
 	st.Warp = nil
-	raw, _ = buildConfig(st, proto.Cert{}, false)
+	raw, _, _ = buildConfig(st, proto.Cert{}, false)
 	if strings.Contains(string(raw), "WARP") {
 		t.Fatalf("WARP without WARP: %s", raw)
 	}
 	st = warpState()
 	st.Warp.Endpoint = "nowhere"
-	if _, err := buildConfig(st, proto.Cert{}, false); err == nil {
+	if _, _, err := buildConfig(st, proto.Cert{}, false); err == nil {
 		t.Fatal("a bad endpoint was accepted")
 	}
 	if routesKey(warpState(), false) == routesKey(st, false) || routesKey(warpState(), false) != routesKey(warpState(), false) {

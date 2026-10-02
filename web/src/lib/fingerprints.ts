@@ -1,12 +1,9 @@
-import type { Schemas } from "../api/client";
 import { t } from "../i18n";
 
-export type Fingerprint = Schemas["SettingsView"]["client_fingerprint"];
-
 // Mirrors proto.Fingerprints: the uTLS profiles mihomo, Xray and sing-box all accept.
-export const FINGERPRINTS: readonly Fingerprint[] = ["chrome", "firefox", "safari", "ios", "android", "edge", "360", "qq", "random", "randomized"];
+export const FINGERPRINTS = ["chrome", "firefox", "safari", "ios", "android", "edge", "360", "qq", "random", "randomized"] as const;
 
-const BROWSERS: Partial<Record<Fingerprint, string>> = {
+const BROWSERS: Record<string, string> = {
   chrome: "Chrome",
   firefox: "Firefox",
   safari: "Safari (macOS)",
@@ -17,8 +14,13 @@ const BROWSERS: Partial<Record<Fingerprint, string>> = {
   qq: "QQ Browser",
 };
 
-/** What the select shows: a browser's name, or what a random profile does. */
-export function fingerprintLabel(fp: Fingerprint): string {
+export const isKnownFingerprint = (fp: string) => (FINGERPRINTS as readonly string[]).includes(fp);
+
+/** Mirrors proto.ValidFingerprint: a known profile or an own one of the right shape. */
+export const validFingerprint = (fp: string) => isKnownFingerprint(fp) || /^[a-z0-9_]{1,32}$/.test(fp);
+
+/** What the select shows: a browser's name, what a random profile does, or the own value. */
+export function fingerprintLabel(fp: string): string {
   if (fp === "random") return t("settings.fpRandom");
   if (fp === "randomized") return t("settings.fpRandomized");
   return BROWSERS[fp] ?? fp;

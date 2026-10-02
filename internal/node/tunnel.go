@@ -8,6 +8,8 @@ import (
 
 	N "github.com/metacubex/mihomo/common/net"
 	C "github.com/metacubex/mihomo/constant"
+
+	"mikan/internal/nodeapi"
 )
 
 // Tunnel sits between mihomo listeners and mihomo's own tunnel: it resolves the slot
@@ -31,30 +33,36 @@ func (t *Tunnel) HandleTCPConn(conn net.Conn, m *C.Metadata) {
 		N.Relay(conn, remote)
 		return
 	}
+	// Another node of the panel relays its users' traffic: the listener checked its key,
+	// and the source node has already counted and limited them. The rules still apply.
+	if m.InName == nodeapi.RelayListener {
+		t.inner.HandleTCPConn(conn, m)
+		return
+	}
 	ip := m.SrcIP.Unmap().String()
-	s := t.reg.admit(userOf(conn, m), m.InName, ip, true)
+	s, b := t.reg.admitIn(userOf(conn, m), m.InName, ip, true)
 	if s == nil {
 		_ = conn.Close()
 		return
 	}
-	c := &countingConn{Conn: conn, slot: s, inName: m.InName, ip: ip, now: t.reg.now}
+	c := &countingConn{Conn: conn, slot: s, bucket: b, inName: m.InName, ip: ip, now: t.reg.now}
 	s.addConn(c)
 	defer c.Close()
 	t.inner.HandleTCPConn(c, m)
 }
 
 func (t *Tunnel) HandleUDPPacket(p C.UDPPacket, m *C.Metadata) {
-	if m.Type == C.INNER {
+	if m.Type == C.INNER || m.InName == nodeapi.RelayListener {
 		t.inner.HandleUDPPacket(p, m)
 		return
 	}
-	s := t.reg.admit(m.InUser, m.InName, m.SrcIP.Unmap().String(), false)
+	s, b := t.reg.admitIn(m.InUser, m.InName, m.SrcIP.Unmap().String(), false)
 	if s == nil {
 		p.Drop()
 		return
 	}
-	s.count(int64(len(p.Data())), 0)
-	t.inner.HandleUDPPacket(&countingPacket{UDPPacket: p, slot: s}, m)
+	s.countIn(b, int64(len(p.Data())), 0)
+	t.inner.HandleUDPPacket(&countingPacket{UDPPacket: p, slot: s, bucket: b}, m)
 }
 
 func (t *Tunnel) NatTable() C.NatTable { return t.inner.NatTable() }
@@ -77,6 +85,7 @@ func userOf(conn net.Conn, m *C.Metadata) string {
 type countingConn struct {
 	net.Conn
 	slot   *slot
+	bucket *bucket // the traffic pool it counts to; nil: the main quota
 	inName string
 	ip     string
 	now    func() time.Time
@@ -86,7 +95,7 @@ type countingConn struct {
 func (c *countingConn) Read(b []byte) (int, error) {
 	n, err := c.Conn.Read(b)
 	if n > 0 {
-		c.slot.count(int64(n), 0)
+		c.slot.countIn(c.bucket, int64(n), 0)
 	}
 	return n, err
 }
@@ -94,17 +103,17 @@ func (c *countingConn) Read(b []byte) (int, error) {
 func (c *countingConn) Write(b []byte) (int, error) {
 	n, err := c.Conn.Write(b)
 	if n > 0 {
-		c.slot.count(0, int64(n))
+		c.slot.countIn(c.bucket, 0, int64(n))
 	}
 	return n, err
 }
 
 func (c *countingConn) UnwrapReader() (io.Reader, []N.CountFunc) {
-	return c.Conn, []N.CountFunc{func(n int64) { c.slot.count(n, 0) }}
+	return c.Conn, []N.CountFunc{func(n int64) { c.slot.countIn(c.bucket, n, 0) }}
 }
 
 func (c *countingConn) UnwrapWriter() (io.Writer, []N.CountFunc) {
-	return c.Conn, []N.CountFunc{func(n int64) { c.slot.count(0, n) }}
+	return c.Conn, []N.CountFunc{func(n int64) { c.slot.countIn(c.bucket, 0, n) }}
 }
 
 func (c *countingConn) Close() error {
@@ -114,13 +123,14 @@ func (c *countingConn) Close() error {
 
 type countingPacket struct {
 	C.UDPPacket
-	slot *slot
+	slot   *slot
+	bucket *bucket
 }
 
 func (p *countingPacket) WriteBack(b []byte, addr net.Addr) (int, error) {
 	n, err := p.UDPPacket.WriteBack(b, addr)
 	if n > 0 {
-		p.slot.count(0, int64(n))
+		p.slot.countIn(p.bucket, 0, int64(n))
 	}
 	return n, err
 }

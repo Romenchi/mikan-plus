@@ -1,24 +1,32 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { ArrowDown, ArrowUp, Bot, Link2, Plus, Send, Trash2, TriangleAlert } from "lucide-react";
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { Link, useBlocker, useNavigate, useSearch } from "@tanstack/react-router";
+import { ArrowDown, ArrowUp, Bell, Bot, Globe, LayoutList, Link2, Megaphone, Network, Plus, PlugZap, Send, Shield, Trash2, TriangleAlert } from "lucide-react";
+import { useMemo, useState, type FormEvent } from "react";
 import { api, ApiError, errorText, unwrap, type Schemas } from "../../api/client";
-import { qk, useSettings } from "../../api/hooks";
+import { qk, useNodes, useSettings } from "../../api/hooks";
+import { useDraft } from "../../lib/draft";
+import { TELEGRAM_TABS } from "../search";
 import { ago, num } from "../../lib/format";
 import { Confirm } from "../../components/overlay";
+import { QueryBoundary } from "../../components/query";
+import { Columns, Tabs } from "../../components/tabs";
 import { useToast } from "../../components/toast";
-import { Bar, Button, ErrorState, Field, PageHeader, Pill, Segmented, Skeleton, Switch } from "../../components/ui";
-import { t, tMaybe } from "../../i18n";
+import { Bar, Button, Field, PageHeader, Pill, Segmented, Skeleton } from "../../components/ui";
+import { Switch } from "../../components/switch";
+import { t, tMaybe, useLocale } from "../../i18n";
 
 type View = Schemas["TelegramView"];
 type Config = Schemas["Config"];
 type MenuButton = Schemas["MenuButton"];
 type TextKey = keyof Schemas["Texts"];
 
+const TAB_ICONS = { connect: PlugZap, menu: LayoutList, notify: Bell, broadcast: Megaphone } as const;
+
 function useTelegram() {
   return useQuery({
     queryKey: qk.telegram,
-    queryFn: () => unwrap(api.GET("/api/v1/telegram")),
+    queryFn: ({ signal }) => unwrap(api.GET("/api/v1/telegram", { signal })),
     // A broadcast in progress moves every second; otherwise little changes.
     refetchInterval: (q) => (q.state.data?.broadcast?.active ? 2_000 : 10_000),
   });
@@ -32,59 +40,93 @@ function usePatchTelegram() {
   });
 }
 
-const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
-
+/**
+ * The bot in four sections: connecting it, its menu and texts, notifications and options,
+ * broadcasts. Menu, texts and options are one draft saved together from the bar below,
+ * whichever section they were changed in.
+ */
 export function TelegramPage() {
   const tg = useTelegram();
+  return (
+    <>
+      <PageHeader title={t("nav.telegram")} sub={t("telegram.subtitle")} />
+      <QueryBoundary
+        query={tg}
+        pending={
+          <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
+            <Skeleton style={{ height: 320, borderRadius: 20 }} />
+            <Skeleton style={{ height: 420, borderRadius: 20 }} />
+          </div>
+        }
+        wrap={(state) => <section className="card glass">{state}</section>}
+      >
+        {(v) => <TelegramBody v={v} />}
+      </QueryBoundary>
+    </>
+  );
+}
+
+function TelegramBody({ v }: { v: View }) {
+  const { tab } = useSearch({ from: "/_app/telegram" });
+  const navigate = useNavigate({ from: "/telegram" });
   const patch = usePatchTelegram();
   const toast = useToast();
-  const [draft, setDraft] = useState<Config | null>(null);
-  const saved = tg.data?.config;
-  // A fresh copy of the saved setup whenever it changes under us (and nothing is edited).
-  useEffect(() => {
-    if (saved && (!draft || same(draft, saved))) setDraft(structuredClone(saved));
-    // Only the server's copy drives this.
-  }, [saved]);
-  const dirty = !!draft && !!saved && !same(draft, saved);
+  // The draft follows the server's copy while untouched and keeps the edits when the copy
+  // changes under it (a poll, the bot saved from another session).
+  const { draft, setDraft, dirty, reset } = useDraft(v.config);
   const save = () =>
-    draft &&
     patch.mutate(
       { config: draft },
       {
-        onSuccess: (v) => {
-          setDraft(structuredClone(v.config));
+        onSuccess: (r) => {
+          setDraft(r.config);
           toast.ok(t("telegram.saved"));
         },
         onError: (e) => toast.error(errorText(e)),
       },
     );
+  // Leaving the page drops the draft: ask first. Switching the section stays on the page.
+  const leave = useBlocker({ shouldBlockFn: ({ current, next }) => dirty && current.pathname !== next.pathname, enableBeforeUnload: () => dirty, withResolver: true });
 
   return (
     <>
-      <PageHeader title={t("nav.telegram")} sub={t("telegram.subtitle")} />
-      {tg.isPending || (tg.data && !draft) ? (
-        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
-          <Skeleton style={{ height: 320, borderRadius: 20 }} />
-          <Skeleton style={{ height: 420, borderRadius: 20 }} />
-        </div>
-      ) : tg.isError ? (
-        <section className="card glass">
-          <ErrorState text={errorText(tg.error)} onRetry={() => void tg.refetch()} />
-        </section>
-      ) : (
-        <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
-          <div className="flex min-w-0 flex-col gap-4">
-            <ConnectCard v={tg.data} />
-            <MenuCard draft={draft!} setDraft={setDraft} />
-            <TextsCard draft={draft!} setDraft={setDraft} defaults={tg.data.defaults} />
-            <OptionsCard draft={draft!} setDraft={setDraft} v={tg.data} />
-            <BroadcastCard v={tg.data} />
+      <Tabs
+        id="telegram"
+        label={t("telegram.sections")}
+        tabs={TELEGRAM_TABS.map((id) => ({ id, label: t(`telegram.tabs.${id}`), icon: TAB_ICONS[id] }))}
+        value={tab}
+        onChange={(next) => void navigate({ search: { tab: next }, replace: true })}
+      >
+        {tab === "connect" ? (
+          <Columns
+            wide="left"
+            left={
+              <>
+                <ConnectCard v={v} />
+                <RouteCard v={v} />
+              </>
+            }
+            right={<Preview draft={draft} v={v} />}
+          />
+        ) : tab === "menu" ? (
+          <Columns
+            wide="left"
+            left={
+              <>
+                <MenuCard draft={draft} setDraft={setDraft} />
+                <TextsCard draft={draft} setDraft={setDraft} defaults={v.defaults} />
+              </>
+            }
+            right={<Preview draft={draft} v={v} />}
+          />
+        ) : tab === "notify" ? (
+          <Columns wide="left" left={<OptionsCard draft={draft} setDraft={setDraft} v={v} />} right={<Preview draft={draft} v={v} />} />
+        ) : (
+          <div className="max-w-3xl">
+            <BroadcastCard v={v} />
           </div>
-          <div className="min-w-0 xl:sticky xl:top-4">
-            <Preview draft={draft!} v={tg.data} />
-          </div>
-        </div>
-      )}
+        )}
+      </Tabs>
       <AnimatePresence>
         {dirty ? (
           <motion.div
@@ -97,7 +139,7 @@ export function TelegramPage() {
             transition={{ type: "spring", stiffness: 420, damping: 32 }}
           >
             <span className="text-[13px] font-medium">{t("telegram.unsaved")}</span>
-            <Button variant="ghost" size="sm" onClick={() => saved && setDraft(structuredClone(saved))}>
+            <Button variant="ghost" size="sm" onClick={reset}>
               {t("telegram.discard")}
             </Button>
             <Button variant="primary" size="sm" loading={patch.isPending} onClick={save}>
@@ -106,6 +148,15 @@ export function TelegramPage() {
           </motion.div>
         ) : null}
       </AnimatePresence>
+      <Confirm
+        open={leave.status === "blocked"}
+        onOpenChange={(open) => !open && leave.reset?.()}
+        title={t("telegram.leaveTitle")}
+        text={t("telegram.leaveText")}
+        confirm={t("telegram.leaveConfirm")}
+        danger
+        onConfirm={() => leave.proceed?.()}
+      />
     </>
   );
 }
@@ -167,7 +218,7 @@ function ConnectCard({ v }: { v: View }) {
             <Bot size={20} />
           </span>
           <div className="min-w-0 flex-1">
-            <a className="font-semibold text-[var(--ink-900)] hover:underline" href={`https://t.me/${v.bot.username}`} target="_blank" rel="noreferrer noopener">
+            <a className="font-semibold text-[var(--ink-900)] hover:underline" href={`https://t.me/${encodeURIComponent(v.bot.username)}`} target="_blank" rel="noreferrer noopener">
               @{v.bot.username}
             </a>
             <div className="truncate text-xs text-[var(--ink-500)]">{v.bot.name}</div>
@@ -233,6 +284,151 @@ function ConnectCard({ v }: { v: View }) {
   );
 }
 
+type RouteMode = Schemas["TelegramRoute"]["mode"];
+const ROUTE_ICON = { direct: Globe, node: Network, proxy: Shield } as const;
+
+// A node opens the tunnel to Telegram since 0.4.2; dev builds and nodes not heard from yet
+// are given the benefit of the doubt (the check on saving tells).
+function tunnels(version?: string): boolean {
+  const m = /^(\d+)\.(\d+)\.(\d+)/.exec(version ?? "");
+  if (!m) return true;
+  const [a, b, c] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  return a > 0 || b > 4 || (b === 4 && c >= 2);
+}
+
+// How the bot reaches Telegram: straight, through a node of the panel or a proxy — for a
+// server where Telegram is blocked.
+function RouteCard({ v }: { v: View }) {
+  const patch = usePatchTelegram();
+  const toast = useToast();
+  const nodes = useNodes();
+  const saved = v.route;
+  const {
+    draft: { mode, nodeId },
+    setDraft: setRoute,
+  } = useDraft<{ mode: RouteMode; nodeId: number }>({ mode: saved.mode, nodeId: saved.node_id ?? 0 });
+  const setMode = (m: RouteMode) => setRoute((d) => ({ ...d, mode: m }));
+  const setNodeId = (n: number) => setRoute((d) => ({ ...d, nodeId: n }));
+  const [proxy, setProxy] = useState("");
+  const [error, setError] = useState("");
+  const remote = (nodes.data ?? []).filter((n) => !n.local);
+  const nodeName = (id?: number) => remote.find((n) => n.id === id)?.name ?? `#${id}`;
+  const now =
+    saved.mode === "node"
+      ? t("telegram.routeNowNode", { name: nodeName(saved.node_id) })
+      : saved.mode === "proxy"
+        ? t("telegram.routeNowProxy", { proxy: saved.proxy ?? "" })
+        : t("telegram.routeNowDirect");
+  const changed = mode !== saved.mode || (mode === "node" && nodeId !== (saved.node_id ?? 0)) || (mode === "proxy" && proxy.trim() !== "");
+  const ready = mode === "direct" || (mode === "node" && nodeId > 0) || (mode === "proxy" && (proxy.trim() !== "" || !!saved.proxy));
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    setError("");
+    const route: Schemas["PatchTelegramInputBody"]["route"] =
+      mode === "node" ? { mode, node_id: nodeId } : mode === "proxy" ? { mode, ...(proxy.trim() ? { proxy: proxy.trim() } : {}) } : { mode };
+    patch.mutate(
+      { route },
+      {
+        onSuccess: (r) => {
+          setProxy("");
+          const how = r.route.mode === "node" ? nodeName(r.route.node_id) : r.route.mode === "proxy" ? (r.route.proxy ?? "") : t("telegram.routeDirectShort");
+          toast.ok(t("telegram.routeSaved", { how }));
+        },
+        onError: (err) => setError(err instanceof ApiError && Object.keys(err.fields).length ? (Object.values(err.fields)[0] ?? "") : errorText(err)),
+      },
+    );
+  };
+  const Icon = ROUTE_ICON[saved.mode];
+  return (
+    <section {...rise(1)}>
+      <div className="card-head">
+        <div>
+          <h2 className="card-title">{t("telegram.routeTitle")}</h2>
+          <div className="card-sub">{t("telegram.routeSub")}</div>
+        </div>
+      </div>
+      <div className="panel-soft mb-4 flex items-center gap-3 p-3">
+        <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[var(--hover)] text-[var(--ink-700)]" aria-hidden>
+          <Icon size={20} />
+        </span>
+        <div className="min-w-0">
+          <div className="text-xs text-[var(--ink-500)]">{t("telegram.routeNow")}</div>
+          <div className="truncate text-[13px] font-semibold">{now}</div>
+        </div>
+      </div>
+      <form onSubmit={submit} noValidate>
+        <div className="mb-4">
+          <Segmented
+            value={mode}
+            onChange={(m) => {
+              setMode(m);
+              setError("");
+            }}
+            label={t("telegram.routeTitle")}
+            options={[
+              { value: "direct", label: t("telegram.routeDirect") },
+              { value: "node", label: t("telegram.routeNode") },
+              { value: "proxy", label: t("telegram.routeProxy") },
+            ]}
+          />
+        </div>
+        {mode === "direct" ? <p className="mb-4 text-xs text-[var(--ink-500)]">{t("telegram.routeDirectHint")}</p> : null}
+        {mode === "node" ? (
+          nodes.isPending ? (
+            <Skeleton style={{ height: 40, borderRadius: 12, maxWidth: 320 }} />
+          ) : remote.length === 0 ? (
+            <div className="banner warn mb-4 flex-wrap" role="status">
+              <span className="min-w-0 flex-1">{t("telegram.routeNoNodes")}</span>
+              <Link to="/nodes" className="btn btn-glass btn-sm">
+                {t("telegram.routeOpenNodes")}
+              </Link>
+            </div>
+          ) : (
+            <Field label={t("telegram.routeNodeLabel")} htmlFor="tg-route-node" hint={t("telegram.routeNodeHint")} error={error}>
+              <select id="tg-route-node" className="input max-w-[320px]" value={nodeId} onChange={(e) => setNodeId(Number(e.target.value))} aria-invalid={!!error}>
+                <option value={0} disabled>
+                  {t("telegram.routeNodePick")}
+                </option>
+                {remote.map((n) => (
+                  <option key={n.id} value={n.id} disabled={!tunnels(n.version)}>
+                    {tunnels(n.version) ? n.name : t("telegram.routeNodeOld", { name: n.name })}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          )
+        ) : null}
+        {mode === "proxy" ? (
+          <Field label={t("telegram.routeProxyLabel")} htmlFor="tg-route-proxy" hint={saved.proxy ? t("telegram.routeProxyKeep", { proxy: saved.proxy }) : t("telegram.routeProxyHint")} error={error}>
+            <input
+              id="tg-route-proxy"
+              className="input mono"
+              type="text"
+              autoComplete="off"
+              spellCheck={false}
+              value={proxy}
+              onChange={(e) => setProxy(e.target.value)}
+              placeholder="socks5://user:pass@203.0.113.5:1080"
+              maxLength={512}
+              aria-invalid={!!error}
+            />
+          </Field>
+        ) : null}
+        {error && mode === "direct" ? (
+          <p className="mb-3 text-xs text-[var(--berry-600)]" role="alert">
+            {error}
+          </p>
+        ) : null}
+        {mode === "node" && !nodes.isPending && remote.length === 0 ? null : (
+          <Button variant="primary" type="submit" loading={patch.isPending} disabled={!changed || !ready}>
+            {mode === "direct" ? t("common.save") : t("telegram.routeSave")}
+          </Button>
+        )}
+      </form>
+    </section>
+  );
+}
+
 const ACTIONS = ["sub", "devices", "connect", "renew", "support", "app"] as const;
 
 function actionLabel(a: string): string {
@@ -247,12 +443,10 @@ function MenuCard({ draft, setDraft }: { draft: Config; setDraft: (c: Config) =>
     setDraft({ ...draft, buttons: list });
   };
   const add = (action: "url" | "page") => {
-    const n = draft.buttons.filter((b) => b.action === "url" || b.action === "page").length + 1;
     setDraft({
       ...draft,
       buttons: [...draft.buttons, { id: `c${Date.now().toString(36)}`, action, label: action === "url" ? t("telegram.newLink") : t("telegram.newPage"), on: true, row: false, url: action === "url" ? "https://" : undefined, text: action === "page" ? "" : undefined }],
     });
-    void n;
   };
   const custom = (b: MenuButton) => !ACTIONS.includes(b.action as (typeof ACTIONS)[number]);
   const reduce = useReducedMotion();
@@ -466,6 +660,7 @@ function Preview({ draft, v }: { draft: Config; v: View }) {
   const settings = useSettings();
   const brand = settings.data?.brand || "VPN";
   const support = !!settings.data?.support_url;
+  const locale = useLocale();
   const sample: Record<string, string> = useMemo(
     () => ({
       brand,
@@ -481,7 +676,8 @@ function Preview({ draft, v }: { draft: Config; v: View }) {
       limit: t("telegram.sample.limit"),
       reset: t("telegram.sample.reset"),
     }),
-    [brand],
+    // The sample texts are translated: they change with the language.
+    [brand, locale],
   );
   const text = (draft.texts.main || v.defaults.main).replace(/\{(\w+)\}/g, (m, k: string) => sample[k] ?? m);
   const reduce = useReducedMotion();

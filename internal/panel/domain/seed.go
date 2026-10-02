@@ -13,8 +13,6 @@ import (
 	"mikan/internal/proto"
 )
 
-const gib = int64(1) << 30
-
 // Seed creates the default inbounds, tariffs and slot pool on a fresh install.
 // Each part is created only if its table is empty, so it is safe to call on every start.
 // Tariffs are named in the default language set at bootstrap, Russian without one.
@@ -64,8 +62,8 @@ func Seed(ctx context.Context, st *store.Store, now time.Time) error {
 			return ru
 		}
 		defaults := []db.CreateTariffParams{
-			{Name: name("Пробный", "Trial"), TrafficLimit: nullInt(5 * gib), DurationDays: 3, DeviceLimit: nullInt(1), ResetStrategy: "none", Sort: 1},
-			{Name: name("Стандарт", "Standard"), TrafficLimit: nullInt(150 * gib), DurationDays: 30, DeviceLimit: nullInt(3), ResetStrategy: "period", Sort: 2},
+			{Name: name("Пробный", "Trial"), TrafficLimit: nullInt(5 * GiB), DurationDays: 3, DeviceLimit: nullInt(1), ResetStrategy: "none", Sort: 1},
+			{Name: name("Стандарт", "Standard"), TrafficLimit: nullInt(150 * GiB), DurationDays: 30, DeviceLimit: nullInt(3), ResetStrategy: "period", Sort: 2},
 			{Name: name("Безлимит", "Unlimited"), DurationDays: 30, DeviceLimit: nullInt(3), ResetStrategy: "none", Sort: 3},
 		}
 		for _, t := range defaults {

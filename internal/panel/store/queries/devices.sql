@@ -7,6 +7,9 @@ SELECT * FROM bound_devices WHERE id = ? AND user_id = ?;
 -- name: ListBoundDevices :many
 SELECT * FROM bound_devices WHERE user_id = ? ORDER BY created_at, id;
 
+-- name: ListIdleBoundDevices :many
+SELECT * FROM bound_devices WHERE last_seen < ?;
+
 -- name: CountBoundDevices :one
 SELECT count(*) FROM bound_devices WHERE user_id = ?;
 
@@ -30,9 +33,6 @@ UPDATE users SET slot_id = ?, updated_at = ? WHERE id = ?;
 
 -- name: SetUserUnboundAt :exec
 UPDATE users SET unbound_at = ? WHERE id = ?;
-
--- name: SetUserBillingDay :exec
-UPDATE users SET billing_day = ?, updated_at = ? WHERE id = ?;
 
 -- name: ListDeviceSlots :many
 -- Slots of bound devices with an id: keys of their own, profile fetches of their own.

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/netip"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -94,7 +93,7 @@ func targetsCmd(ctx context.Context, st *store.Store, set *settings.Settings, cf
 		if err != nil {
 			return fmt.Errorf("no node %d", *node)
 		}
-		r := checkTarget(ctx, cfg, n, strings.TrimSpace(*dest), strings.TrimSpace(*sni))
+		r := checkTarget(ctx, cfg, n, strings.TrimSpace(*dest), strings.TrimSpace(*sni), panelPort(ctx, set))
 		if *asJSON {
 			return json.NewEncoder(stdout).Encode(r)
 		}
@@ -137,19 +136,25 @@ func targetsCmd(ctx context.Context, st *store.Store, set *settings.Settings, cf
 			}
 		}
 		if !*force {
-			r := checkTarget(ctx, cfg, n, *dest, *sni)
+			r := checkTarget(ctx, cfg, n, *dest, *sni, panelPort(ctx, set))
 			if !r.OK {
 				return fmt.Errorf("%s does not suit REALITY: %s; --force applies it anyway", *dest, targetProblem(r))
 			}
 			fmt.Fprintf(stderr, "%s (%s): TLS 1.3, HTTP/2, X25519, valid certificate, %d ms.\n", *dest, r.SNI, r.RTTms)
 		}
+		ins := domain.NewInbounds(st, nil, time.Now)
 		for _, name := range names {
-			prev, next, err := domain.SetInboundTarget(ctx, st, n.ID, name, *dest, *sni, time.Now())
+			// The keys stay: clients keep working once they refresh the subscription.
+			var prev, next db.Inbound
+			in, err := ins.Find(ctx, n.ID, name)
+			if err == nil {
+				prev, next, err = ins.Update(ctx, in.ID, domain.InboundPatch{Dest: dest, ServerName: sni})
+			}
 			var pe *proto.Error
 			switch {
 			case errors.Is(err, domain.ErrUnknownInbound):
 				return fmt.Errorf("node %d has no inbound %q: see mikan admin inbound list", n.ID, name)
-			case errors.Is(err, domain.ErrNoReality):
+			case errors.As(err, &pe) && pe.Code == "dest_no_reality":
 				return fmt.Errorf("inbound %s has no REALITY camouflage", name)
 			case errors.As(err, &pe):
 				return fmt.Errorf("%s: %s", name, targetError(pe))
@@ -195,7 +200,7 @@ func scanTargets(ctx context.Context, st *store.Store, set *settings.Settings, c
 		if err != nil {
 			return res, err
 		}
-		r := checkTarget(ctx, cfg, n, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), domainName)
+		r := checkTarget(ctx, cfg, n, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), domainName, port)
 		res.SelfSteal = &r
 	}
 	if c, err := app.NodeClient(cfg, n); err == nil {
@@ -210,7 +215,7 @@ func scanTargets(ctx context.Context, st *store.Store, set *settings.Settings, c
 	// A node older than 0.3 or out of reach: the panel scans from its own network.
 	sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	found, scanned, err := scan.Neighbors(sctx, res.IP, 12)
+	found, scanned, err := scan.Neighbors(sctx, res.IP, 12, scan.Options{Any: true})
 	if err != nil && sctx.Err() == nil {
 		return res, err
 	}
@@ -223,7 +228,7 @@ func scanTargets(ctx context.Context, st *store.Store, set *settings.Settings, c
 
 // checkTarget tests a site from the node that would dial it, or from here when the node
 // cannot tell.
-func checkTarget(ctx context.Context, cfg config.Config, n db.Node, dest, sni string) scan.Result {
+func checkTarget(ctx context.Context, cfg config.Config, n db.Node, dest, sni string, selfPort int) scan.Result {
 	if c, err := app.NodeClient(cfg, n); err == nil {
 		if r, err := c.CheckTarget(ctx, nodeapi.TargetCheckRequest{Dest: dest, SNI: sni}); err == nil {
 			return r
@@ -231,7 +236,13 @@ func checkTarget(ctx context.Context, cfg config.Config, n db.Node, dest, sni st
 	}
 	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	return scan.Check(cctx, dest, sni)
+	return scan.Check(cctx, dest, sni, scan.Options{LoopbackPort: selfPort})
+}
+
+// panelPort is the panel's own port: the one loopback address a target check may use.
+func panelPort(ctx context.Context, set *settings.Settings) int {
+	p, _, _ := settings.Get[int](ctx, set, settings.KeyPanelPort)
+	return p
 }
 
 // ipv4 is the address whose /24 is scanned.
@@ -239,27 +250,24 @@ func ipv4(ctx context.Context, host string) (string, error) {
 	if host == "" {
 		return "", errors.New("the server's address is not set: run `mikan admin bootstrap`")
 	}
-	if a, err := netip.ParseAddr(host); err == nil {
-		if !a.Is4() {
-			return "", fmt.Errorf("%s is not an IPv4 address", host)
-		}
-		return a.String(), nil
-	}
-	addrs, err := net.DefaultResolver.LookupNetIP(ctx, "ip4", host)
-	if err != nil || len(addrs) == 0 {
+	ip, err := scan.ResolveIPv4(ctx, host)
+	switch {
+	case errors.Is(err, scan.ErrNotIPv4):
+		return "", fmt.Errorf("%s is not an IPv4 address", host)
+	case err != nil:
 		return "", fmt.Errorf("%s has no IPv4 address", host)
 	}
-	return addrs[0].String(), nil
+	return ip, nil
 }
 
 // realityTargets lists the node's inbounds that have a REALITY camouflage.
 func realityTargets(ctx context.Context, st *store.Store, nodeID int64) ([]Target, error) {
-	all, err := st.Q.ListInbounds(ctx)
+	inbounds, err := st.Q.ListNodeInbounds(ctx, nodeID)
 	if err != nil {
 		return nil, err
 	}
 	out := []Target{}
-	for _, in := range domain.NodeInbounds(all, nodeID) {
+	for _, in := range inbounds {
 		if t := targetOf(in); t.Dest != "" {
 			out = append(out, t)
 		}
@@ -279,28 +287,23 @@ func targetOf(in db.Inbound) Target {
 	return t
 }
 
-var checkErrors = map[string]string{
+// problemText says in words what scan.Problem names with a code.
+var problemText = map[string]string{
 	"timeout": "no answer", "refused": "connection refused", "no_tls13": "no TLS 1.3", "dns": "the name does not resolve",
 	"sni_required": "an IP needs --sni", "bad_dest": "want host:port", "handshake": "the TLS handshake failed",
+	"no_x25519": "no X25519", "no_h2": "no HTTP/2", "private": "an internal address: only public sites suit",
 }
 
 // targetProblem says why a site does not suit REALITY.
 func targetProblem(r scan.Result) string {
+	code := scan.Problem(r)
 	switch {
-	case r.Error != "":
-		if s, ok := checkErrors[r.Error]; ok {
-			return s
-		}
-		return r.Error
-	case !r.TLS13:
-		return "no TLS 1.3"
-	case !r.X25519:
-		return "no X25519"
-	case !r.H2:
-		return "no HTTP/2"
-	default:
+	case problemText[code] != "":
+		return problemText[code]
+	case code == "cert":
 		return "the certificate is not valid for " + r.SNI
 	}
+	return code
 }
 
 func targetError(e *proto.Error) string {

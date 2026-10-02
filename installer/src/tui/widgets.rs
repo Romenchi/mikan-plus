@@ -185,6 +185,15 @@ impl Input {
         self.value.trim().to_owned()
     }
 
+    /// Takes pasted text: its first line, without control characters. Pasted as keys, the
+    /// line break would act as Enter and press Next.
+    pub fn paste(&mut self, text: &str) {
+        // A terminal sends a line break as CR as often as LF.
+        for c in text.split(['\r', '\n']).next().unwrap_or_default().chars().filter(|c| !c.is_control()) {
+            self.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+    }
+
     /// Takes an editing key; false when the key is not for the field.
     pub fn key(&mut self, k: KeyEvent) -> bool {
         let at = |s: &str, i: usize| s.char_indices().nth(i).map_or(s.len(), |(b, _)| b);
@@ -356,6 +365,21 @@ mod tests {
         i.key(KeyEvent::from(KeyCode::Backspace));
         assert_eq!(i.value, "vpn.example.co");
         assert!(!i.key(KeyEvent::from(KeyCode::Enter)));
+    }
+
+    // A pasted line break would press Enter (Next) if it came as keys: only the first line
+    // goes in, whichever way the terminal ends it, and no control character with it.
+    #[test]
+    fn a_paste_is_one_line() {
+        for text in ["vpn.example.com\nsecond", "vpn.example.com\rsecond", "vpn.example.com\r\nsecond", "vpn.example.com"] {
+            let mut i = Input::new("");
+            i.paste(text);
+            assert_eq!(i.value, "vpn.example.com", "{text:?}");
+        }
+        let mut i = Input::new("ab");
+        i.key(KeyEvent::from(KeyCode::Left));
+        i.paste("\x1b[31mX\ty");
+        assert_eq!(i.value, "a[31mXyb", "an escape is not text");
     }
 
     #[test]

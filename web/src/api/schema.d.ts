@@ -4,6 +4,74 @@
  */
 
 export interface paths {
+    "/api/v1/addons": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Маркетплейс способов оплаты */
+        get: operations["list-addons"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/addons/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Настройки адаптера */
+        patch: operations["update-addon"];
+        trace?: never;
+    };
+    "/api/v1/addons/{id}/install": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Установить или обновить адаптер: заявка серверу */
+        post: operations["install-addon"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/addons/{id}/remove": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Удалить адаптер: заявка серверу */
+        post: operations["remove-addon"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/api-keys": {
         parameters: {
             query?: never;
@@ -34,6 +102,23 @@ export interface paths {
         post?: never;
         /** Отозвать ключ API */
         delete: operations["delete-api-key"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Журнал действий админа: хранится 180 суток */
+        get: operations["list-audit"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -332,6 +417,42 @@ export interface paths {
         patch: operations["update-node"];
         trace?: never;
     };
+    "/api/v1/nodes/{id}/cascade": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Каскад ноды: выходы и служебный вход */
+        get: operations["get-node-cascade"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Куда нода выпускает трафик других нод */
+        patch: operations["update-node-cascade"];
+        trace?: never;
+    };
+    "/api/v1/nodes/{id}/certificate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Поставить ноде свой сертификат */
+        put: operations["set-node-certificate"];
+        post?: never;
+        /** Вернуть ноде самоподписанный сертификат */
+        delete: operations["clear-node-certificate"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/nodes/{id}/key": {
         parameters: {
             query?: never;
@@ -402,6 +523,42 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/packages": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Пакеты трафика */
+        get: operations["list-packages"];
+        put?: never;
+        /** Создать пакет трафика */
+        post: operations["create-package"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/packages/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Изменить пакет трафика */
+        put: operations["update-package"];
+        post?: never;
+        /** Убрать пакет в архив */
+        delete: operations["archive-package"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/payments": {
         parameters: {
             query?: never;
@@ -454,6 +611,42 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/pools": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Пулы трафика */
+        get: operations["list-pools"];
+        put?: never;
+        /** Создать пул трафика */
+        post: operations["create-pool"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/pools/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Удалить пул: его подключения вернутся в основной трафик; пока в нём есть оплаченный трафик, пул остаётся */
+        delete: operations["delete-pool"];
+        options?: never;
+        head?: never;
+        /** Переименовать пул */
+        patch: operations["rename-pool"];
+        trace?: never;
+    };
     "/api/v1/presets": {
         parameters: {
             query?: never;
@@ -487,6 +680,24 @@ export interface paths {
         head?: never;
         /** Изменить настройки */
         patch: operations["update-settings"];
+        trace?: never;
+    };
+    "/api/v1/settings/certificate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Поставить свой сертификат панели */
+        put: operations["set-certificate"];
+        post?: never;
+        /** Вернуть сертификат Let's Encrypt */
+        delete: operations["clear-certificate"];
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/v1/settings/certificate/renew": {
@@ -802,6 +1013,42 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/users/{id}/grants": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Пакеты трафика пользователя */
+        get: operations["user-grants"];
+        put?: never;
+        /** Начислить трафик */
+        post: operations["grant-traffic"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/users/{id}/pools": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Пулы трафика пользователя */
+        get: operations["user-pools"];
+        /** Лимиты пулов пользователя */
+        put: operations["set-user-pools"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/users/{id}/reissue": {
         parameters: {
             query?: never;
@@ -890,6 +1137,88 @@ export interface components {
             /** @enum {string} */
             scope: "read" | "full";
         };
+        AddonCatalogEntry: {
+            description: {
+                [key: string]: string;
+            };
+            homepage: string;
+            id: string;
+            installed: boolean;
+            /** @description Название по языкам */
+            name: {
+                [key: string]: string;
+            };
+            /** @description Установлен, а в каталоге другая сборка */
+            update: boolean;
+            version: string;
+        };
+        AddonField: {
+            key: string;
+            label: {
+                [key: string]: string;
+            };
+            pattern?: string;
+            required: boolean;
+            /** @description Значение API не отдаёт; пусто при сохранении — оставить прежнее */
+            secret: boolean;
+            /** @description Значение сохранено */
+            set: boolean;
+            /** @enum {string} */
+            type: "string" | "bool";
+            /** @description Текущее значение, кроме секретов */
+            value?: unknown;
+        };
+        AddonRequest: {
+            /** @enum {string} */
+            action: "install" | "remove";
+            /** @description RFC 3339 */
+            at: string;
+            id: string;
+        };
+        AddonResult: {
+            /** @enum {string} */
+            action: "install" | "remove";
+            /** @description RFC 3339 */
+            at: string;
+            error?: string;
+            id: string;
+            /** @enum {string} */
+            state: "done" | "failed";
+        };
+        AddonView: {
+            /** @description Принимает оплату прямо сейчас: включён, настроен, работает */
+            available: boolean;
+            enabled: boolean;
+            /** @description Почему контейнер не работает */
+            error?: string;
+            help: {
+                [key: string]: string;
+            };
+            id: string;
+            /** @description Адаптер не ответил о себе: настройки недоступны */
+            info_error?: string;
+            name: {
+                [key: string]: string;
+            };
+            settings: components["schemas"]["AddonField"][];
+            /** @enum {string} */
+            status: "running" | "failed";
+            version: string;
+            /** @description Адрес для уведомлений в кабинете провайдера */
+            webhook_url: string;
+        };
+        AddonsView: {
+            catalog: components["schemas"]["AddonCatalogEntry"][];
+            /** @description catalog_unavailable — каталог не загрузился */
+            catalog_error?: string;
+            installed: components["schemas"]["AddonView"][];
+            /** @description Как сервер выполнил последнюю заявку */
+            last?: components["schemas"]["AddonResult"];
+            /** @description Заявка, которую сервер ещё не взял */
+            pending?: components["schemas"]["AddonRequest"];
+            /** @description Панель видит каталог данных сервера; иначе ставить адаптеры нельзя */
+            supported: boolean;
+        };
         AdminView: {
             /** Format: int64 */
             id: number;
@@ -897,6 +1226,33 @@ export interface components {
             last_login_at?: string;
             totp_enabled: boolean;
             username: string;
+        };
+        AuditEntry: {
+            /** @description Например user.create, settings.update, auth.login_failed */
+            action: string;
+            /**
+             * Format: int64
+             * @description null — система, консоль сервера или неудачный вход
+             */
+            admin_id: number | null;
+            /** Format: date-time */
+            at: string;
+            /** @description Подробности действия; null — нет */
+            details: unknown;
+            /** Format: int64 */
+            id: number;
+            ip: string;
+            target_id: string;
+            target_type: string;
+        };
+        AuditOutputBody: {
+            /** @description От новых к старым */
+            items: components["schemas"]["AuditEntry"][];
+            /**
+             * Format: int64
+             * @description Передайте как before за следующей страницей; 0 — это всё
+             */
+            next: number;
         };
         AutoEvent: {
             /** Format: date-time */
@@ -971,11 +1327,71 @@ export interface components {
             /** Format: int64 */
             affected: number;
         };
+        CascadeExit: {
+            /** @description Подключения этой ноды, которые выходят через ту ноду */
+            inbounds: string[];
+            name: string;
+            /** Format: int64 */
+            node_id: number;
+            /** @description Проверка с этой ноды: какой IP видят сайты через цепочку */
+            probe?: components["schemas"]["ProbeView"];
+            /** @description Через неё идёт и трафик, который другие ноды передают через эту */
+            relay: boolean;
+        };
+        CascadeHop: {
+            name: string;
+            /** Format: int64 */
+            node_id: number;
+        };
+        CascadePatchInputBody: {
+            /** Format: int64 */
+            exit_node_id?: number;
+            /**
+             * @description Куда выпускать трафик других нод, пришедший через эту
+             * @enum {string}
+             */
+            outbound: "direct" | "warp" | "node";
+        };
+        CascadeView: {
+            /** @description Ноды, через которые эта нода выпускает трафик */
+            exits: components["schemas"]["CascadeExit"][];
+            /** @description Служебный вход для других нод; есть, когда кто-то выходит через эту ноду */
+            relay?: components["schemas"]["CascadeViewRelayStruct"];
+        };
+        CascadeViewRelayStruct: {
+            /** Format: int64 */
+            exit_node_id?: number;
+            /**
+             * @description Куда эта нода выпускает их трафик
+             * @enum {string}
+             */
+            outbound: "direct" | "warp" | "node";
+            port: string;
+            /** @description Ноды, которые выходят через эту */
+            sources: components["schemas"]["CascadeHop"][];
+        };
+        CertInputBody: {
+            /** @description Цепочка в PEM: сначала сертификат, за ним промежуточные (fullchain.pem) */
+            cert: string;
+            /** @description Закрытый ключ в PEM (privkey.pem): RSA от 2048 бит, ECDSA P-256/384/521 или Ed25519 */
+            key: string;
+        };
         CheckTargetInputBody: {
             /** @description host:port */
             dest: string;
             /** @description Имя для клиентов; по умолчанию — хост из dest */
             sni?: string;
+        };
+        ClientEndpoint: {
+            /**
+             * Format: int64
+             * @description Порт для клиентов; 0 — порт подключения
+             */
+            port: number;
+            /** @description Адрес для клиентов; пусто — адрес ноды */
+            server: string;
+            /** @description SNI для клиентов; пусто — как обычно */
+            sni: string;
         };
         Config: {
             /** @description Кнопки главного меню по порядку */
@@ -1001,11 +1417,15 @@ export interface components {
              */
             expire_days?: number;
             name: string;
+            /** @description Пароль админа: ключ не выпускается из одной лишь украденной сессии */
+            password: string;
             /**
-             * @description read — только GET-запросы, full — всё, кроме входа, сессий и ключей
+             * @description read — только GET-запросы, без ссылок подписок и секретных адресов; full — изменения, кроме входа, сессий, ключей и операций, где уходят деньги, ключи и адреса клиентов (в справочнике помечены «только сессия»)
              * @enum {string}
              */
             scope: "read" | "full";
+            /** @description Код из приложения, если включена 2FA */
+            totp?: string;
         };
         CreateAPIKeyOutputBody: {
             /** Format: date-time */
@@ -1037,7 +1457,7 @@ export interface components {
             node_id?: number;
             port?: string;
             /** @enum {string} */
-            preset: "vless_reality_xhttp" | "hysteria2" | "tuic_v5" | "vless_reality_vision" | "vless_reality_grpc" | "trojan_reality" | "anytls" | "vless_reality_xhttp_pq" | "trusttunnel" | "shadowquic" | "mieru" | "shadowsocks_2022" | "sudoku" | "snell" | "custom";
+            preset: "vless_reality_xhttp" | "hysteria2" | "hysteria2_gecko" | "tuic_v5" | "vless_reality_vision" | "vless_reality_grpc" | "trojan_reality" | "anytls" | "vless_reality_xhttp_pq" | "trusttunnel" | "shadowquic" | "mieru" | "shadowsocks_2022" | "sudoku" | "snell" | "custom";
         };
         CreateNodeInputBody: {
             /**
@@ -1060,7 +1480,6 @@ export interface components {
             tariff_id: number;
         };
         DeviceView: {
-            client: string;
             /** Format: date-time */
             first_seen: string;
             ip: string;
@@ -1118,6 +1537,52 @@ export interface components {
              */
             months?: number;
         };
+        GrantInputBody: {
+            /**
+             * Format: int64
+             * @description От 1 ГБ до 100 ТБ
+             */
+            bytes: number;
+            /** Format: int64 */
+            days?: number;
+            /** @enum {string} */
+            lifetime: "used" | "period" | "days";
+            /** @description За что: бонус, компенсация */
+            note?: string;
+            /**
+             * Format: int64
+             * @description Пул трафика; не передан — основной трафик
+             */
+            pool_id?: number;
+        };
+        GrantView: {
+            /** @description Ещё считается: не израсходован и не истёк */
+            active: boolean;
+            /** Format: int64 */
+            bytes: number;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            expires_at: string | null;
+            /** Format: int64 */
+            id: number;
+            /** @enum {string} */
+            lifetime: "used" | "period" | "days";
+            note: string;
+            /** @description Название пакета; пусто — начислено вручную */
+            package_name: string;
+            /** Format: int64 */
+            payment_id: number | null;
+            /**
+             * Format: int64
+             * @description Пул трафика; null — основной трафик
+             */
+            pool_id: number | null;
+            /** Format: int64 */
+            remaining: number;
+            /** @enum {string} */
+            source: "purchase" | "admin";
+        };
         HostStatus: {
             /** @description RFC 3339 */
             at: string;
@@ -1135,6 +1600,10 @@ export interface components {
             auto_port: boolean;
             /** @description Панель сама меняет сайт маскировки REALITY, если он перестал подходить (и включено в настройках) */
             auto_sni: boolean;
+            /** @description Куда подключаются клиенты, если не к ноде напрямую (mikan.client в шаблоне) */
+            client: components["schemas"]["ClientEndpoint"];
+            /** @description Можно ли задать клиентам свой SNI: у REALITY имя задаёт сайт маскировки */
+            client_sni: boolean;
             /** @description Шаблон листенера (YAML) */
             config: string;
             /** @description Сайт для маскировки REALITY */
@@ -1143,19 +1612,33 @@ export interface components {
             display_name: string;
             enabled: boolean;
             error?: string;
+            /**
+             * Format: int64
+             * @description Нода, через которую выходит трафик, если outbound=node
+             */
+            exit_node_id?: number;
             /** @description Отпечаток TLS (uTLS) у клиентов; пусто — общий из настроек */
             fingerprint?: string;
             /** Format: int64 */
             id: number;
+            /** @description Адрес, на котором нода слушает: пусто — все адреса, 127.0.0.1 — только сам сервер (за nginx или HAProxy) */
+            listen: string;
             name: string;
             network: string;
             /** Format: int64 */
             node_id: number;
+            /** @description Hysteria2: salamander, gecko или пусто (без обфускации); у других типов поля нет */
+            obfs?: string;
             /**
-             * @description Выход в интернет: напрямую с сервера или через WARP ноды
+             * @description Выход в интернет: напрямую с сервера, через WARP ноды или через другую ноду (каскад)
              * @enum {string}
              */
-            outbound: "direct" | "warp";
+            outbound: "direct" | "warp" | "node";
+            /**
+             * Format: int64
+             * @description Пул трафика, в который считается подключение; нет — основной трафик
+             */
+            pool_id?: number;
             port: string;
             preset: string;
             server_names?: string[];
@@ -1222,9 +1705,27 @@ export interface components {
             /** @description Для action=url: https:// или tg:// */
             url?: string;
         };
+        NodeCertInputBody: {
+            /** @description Цепочка в PEM: сначала сертификат, за ним промежуточные (fullchain.pem) */
+            cert: string;
+            /** @description Закрытый ключ в PEM (privkey.pem): RSA от 2048 бит, ECDSA P-256/384/521 или Ed25519 */
+            key: string;
+        };
+        NodeCertView: {
+            /** @description custom_expired, custom_invalid — сертификат не используется, нода на своём самоподписанном */
+            error?: string;
+            issuer: string;
+            /** @description Домены и IP, на которые он выписан */
+            names: string[];
+            /** Format: date-time */
+            not_after: string;
+            /** @description Публично доверенный для адреса: приложения принимают его без пина */
+            trusted: boolean;
+        };
         NodeInfo: {
             /** @description host:port API ноды; пусто у своей ноды */
             address: string;
+            certificate?: components["schemas"]["NodeCertView"];
             /** Format: date-time */
             checked_at?: string;
             /** Format: int64 */
@@ -1305,27 +1806,122 @@ export interface components {
             /** Format: int64 */
             users_total: number;
         };
+        PackageBody: {
+            /**
+             * Format: int64
+             * @description От 1 ГБ до 100 ТБ
+             */
+            bytes: number;
+            /**
+             * Format: int64
+             * @description Для lifetime=days: 1–3650
+             */
+            days?: number;
+            /** @enum {string} */
+            lifetime: "used" | "period" | "days";
+            name: string;
+            /** @description Продавать в боте и Mini App; нужна хотя бы одна цена */
+            on_sale?: boolean;
+            /**
+             * Format: int64
+             * @description Пул трафика; не передан — основной трафик
+             */
+            pool_id?: number;
+            /**
+             * Format: int64
+             * @description Цена в копейках: 7900 — 79 ₽
+             */
+            price_rub?: number;
+            /** Format: int64 */
+            price_stars?: number;
+            /** Format: int64 */
+            sort?: number;
+        };
+        PackageView: {
+            /** Format: int64 */
+            bytes: number;
+            /**
+             * Format: int64
+             * @description Срок в днях для lifetime=days
+             */
+            days: number;
+            /** Format: int64 */
+            id: number;
+            /**
+             * @description used — пока не израсходован, period — до конца периода, days — N дней с покупки
+             * @enum {string}
+             */
+            lifetime: "used" | "period" | "days";
+            name: string;
+            on_sale: boolean;
+            /**
+             * Format: int64
+             * @description Пул трафика; null — основной трафик
+             */
+            pool_id: number | null;
+            /**
+             * Format: int64
+             * @description Цена в копейках; null — не продаётся за рубли
+             */
+            price_rub: number | null;
+            /**
+             * Format: int64
+             * @description Цена в Telegram Stars; null — не продаётся за Stars
+             */
+            price_stars: number | null;
+            /** Format: int64 */
+            sort: number;
+        };
         PasswordInputBody: {
             current: string;
             /** @description Не короче 12 символов */
             new: string;
+            /** @description Отозвать и ключи API (по умолчанию да): другие сессии завершаются при смене пароля, ключ, выпущенный из угнанной сессии, пережил бы это */
+            revoke_keys?: boolean;
+        };
+        PatchAddonInputBody: {
+            enabled?: boolean;
+            /** @description Только то, что меняется; секрет пустой строкой — оставить прежний */
+            settings?: {
+                [key: string]: unknown;
+            };
         };
         PatchInboundInputBody: {
+            /** @description Нельзя включить, пока у подключения свой адрес (listen) */
             auto_port?: boolean;
             auto_sni?: boolean;
+            /** @description Куда подключаются клиенты: адрес, порт и SNI прокси перед нодой; заменяет все три */
+            client?: components["schemas"]["ClientEndpoint"];
             /** @description Шаблон листенера (YAML) */
             config?: string;
             dest?: string;
             /** @description Можно с эмодзи: «🇳🇱 Нидерланды». Пусто — имя по умолчанию */
             display_name?: string;
             enabled?: boolean;
-            /** @description Отпечаток TLS у клиентов (chrome, firefox, safari, ios, android, edge, 360, qq, random, randomized); пусто — общий из настроек */
-            fingerprint?: string;
             /**
-             * @description Выход в интернет: напрямую или через WARP ноды
+             * Format: int64
+             * @description Для outbound=node: через какую ноду
+             */
+            exit_node_id?: number;
+            /** @description Отпечаток TLS у клиентов: из списка (chrome, firefox, safari, ios, android, edge, 360, qq, random, randomized) или своё — латиница, цифры, _; пусто — общий из настроек */
+            fingerprint?: string;
+            /** @description Адрес, на котором нода слушает: пусто — все адреса, иначе один IP (127.0.0.1 — за nginx или HAProxy на том же сервере). Свой адрес выключает перенос порта */
+            listen?: string;
+            /**
+             * @description Обфускация Hysteria2. Gecko понимают только приложения на ядре mihomo 1.19.26+: остальные это подключение не получат
              * @enum {string}
              */
-            outbound?: "direct" | "warp";
+            obfs?: "salamander" | "gecko";
+            /**
+             * @description Выход в интернет: напрямую, через WARP ноды или через другую ноду
+             * @enum {string}
+             */
+            outbound?: "direct" | "warp" | "node";
+            /**
+             * Format: int64
+             * @description Пул трафика; 0 — основной трафик
+             */
+            pool_id?: number;
             port?: string;
             /** @description SNI для клиентов, если dest — IP (цель из подбора соседей) */
             server_name?: string;
@@ -1338,23 +1934,16 @@ export interface components {
         };
         PatchPaymentSettingsInputBody: {
             allow_new?: boolean;
-            cryptobot?: boolean;
-            cryptobot_testnet?: boolean;
-            /** @description Пусто — удалить токен */
-            cryptobot_token?: string;
+            enabled?: boolean;
             renew_resets_traffic?: boolean;
             stars?: boolean;
-            yookassa?: boolean;
-            /** @description Пусто — удалить ключ */
-            yookassa_secret?: string;
-            yookassa_shop_id?: string;
         };
         PatchSettingsInputBody: {
             auto_port?: boolean;
             auto_sni?: boolean;
             brand?: string;
-            /** @enum {string} */
-            client_fingerprint?: "chrome" | "firefox" | "safari" | "ios" | "android" | "edge" | "360" | "qq" | "random" | "randomized";
+            /** @description Из списка или своё: латиница в нижнем регистре, цифры и _, до 32 символов */
+            client_fingerprint?: string;
             /** @enum {string} */
             default_lang?: "auto" | "ru" | "en";
             device_binding?: boolean;
@@ -1365,14 +1954,23 @@ export interface components {
             quiet_hour_utc?: number;
             sub_group_auto?: string;
             sub_group_main?: string;
+            /**
+             * Format: int64
+             * @description Отдельный порт подписок на сервере панели; 0 — убрать. Ссылки переезжают на него, старые продолжают работать
+             */
+            sub_port?: number;
             /** @enum {string} */
             sub_routing?: "ru_direct" | "all";
+            /** @description Свои правила Clash, до 500 строк; ошибка указывает номер строки */
+            sub_rules?: string;
             /** @description https://… или tg://… */
             support_url?: string;
         };
         PatchTelegramInputBody: {
             config?: components["schemas"]["Config"];
             enabled?: boolean;
+            /** @description Перед сохранением панель проверяет, что Telegram отвечает этим путём */
+            route?: components["schemas"]["RouteStruct"];
             /** @description Токен от @BotFather; пустая строка — удалить */
             token?: string;
         };
@@ -1411,26 +2009,24 @@ export interface components {
             allow_new: boolean;
             /** @description Что принимает оплату прямо сейчас: включено, настроено, для Stars — бот запущен */
             available: components["schemas"]["PaymentSettingsViewAvailableStruct"];
-            cryptobot: boolean;
-            cryptobot_testnet: boolean;
-            cryptobot_token_set: boolean;
+            /** @description Продажа подписок: выключено — бот и Mini App ничего не продают, новые счета не создаются, уже открытые засчитываются */
+            enabled: boolean;
+            /** @description Встроенные ЮKassa и CryptoBot переехали в маркетплейс: адаптеры, которые сервер ещё ставит */
+            moving: string[];
+            /**
+             * Format: int64
+             * @description Сколько тарифов бот может продать прямо сейчас: «В продаже» и с ценой для способа, который принимает оплату
+             */
+            on_sale: number;
             /** @description Оплаченное продление обнуляет трафик и начинает новый период; иначе только добавляет срок */
             renew_resets_traffic: boolean;
             /** @description Telegram Stars: нужен только запущенный бот */
             stars: boolean;
-            /** @description Адрес вебхуков в настройках приложения @CryptoBot */
-            webhook_cryptobot: string;
-            /** @description Адрес для HTTP-уведомлений в личном кабинете ЮKassa */
-            webhook_yookassa: string;
-            yookassa: boolean;
-            /** @description Секретный ключ сохранён; сам ключ API не отдаёт */
-            yookassa_secret_set: boolean;
-            yookassa_shop_id: string;
         };
         PaymentSettingsViewAvailableStruct: {
-            cryptobot: boolean;
+            /** @description Адаптеры маркетплейса, которые принимают оплату прямо сейчас */
+            addons: string[];
             stars: boolean;
-            yookassa: boolean;
         };
         PaymentTotal: {
             /** Format: int64 */
@@ -1458,12 +2054,15 @@ export interface components {
             external_id?: string;
             /** Format: int64 */
             id: number;
-            /** @enum {string} */
-            kind: "new" | "renew";
+            /**
+             * @description package — пакет трафика: tariff_name — название пакета
+             * @enum {string}
+             */
+            kind: "new" | "renew" | "package";
             /** Format: date-time */
             paid_at?: string;
-            /** @enum {string} */
-            provider: "stars" | "yookassa" | "cryptobot";
+            /** @description stars или addon:<id> — адаптер маркетплейса */
+            provider: string;
             /** Format: date-time */
             refunded_at?: string;
             /** @enum {string} */
@@ -1480,6 +2079,37 @@ export interface components {
             items: components["schemas"]["PaymentView"][];
             /** @description Применённые платежи за 30 дней */
             totals: components["schemas"]["PaymentTotal"][];
+        };
+        PoolInputBody: {
+            name: string;
+        };
+        PoolLimit: {
+            /** Format: int64 */
+            pool_id: number;
+            /**
+             * Format: int64
+             * @description Байты; null — без лимита
+             */
+            traffic_limit: number | null;
+        };
+        PoolPatchInputBody: {
+            name: string;
+        };
+        PoolView: {
+            /** Format: int64 */
+            id: number;
+            /** @description Подключения, которые считаются в этот пул */
+            inbounds: string[];
+            name: string;
+        };
+        ProbeView: {
+            /** Format: date-time */
+            checked_at: string;
+            colo?: string;
+            error?: string;
+            /** @description Адрес, который видят сайты */
+            ip?: string;
+            ok: boolean;
         };
         RecoveryOutputBody: {
             /** @description Показываются один раз */
@@ -1506,6 +2136,17 @@ export interface components {
             sni: string;
             tls13: boolean;
             x25519: boolean;
+        };
+        RouteStruct: {
+            /** @enum {string} */
+            mode: "direct" | "node" | "proxy";
+            /**
+             * Format: int64
+             * @description Удалённая нода панели (mode=node)
+             */
+            node_id?: number;
+            /** @description socks5://user:pass@host:port, http://… или https://…; не передан — прежний (mode=proxy) */
+            proxy?: string;
         };
         ScanTargetsOutputBody: {
             /** @description Адрес сервера, вокруг которого искали */
@@ -1534,11 +2175,8 @@ export interface components {
             auto_sni: boolean;
             brand: string;
             certificate: components["schemas"]["Status"];
-            /**
-             * @description Отпечаток TLS (uTLS) у клиентов, если у подключения не задан свой
-             * @enum {string}
-             */
-            client_fingerprint: "chrome" | "firefox" | "safari" | "ios" | "android" | "edge" | "360" | "qq" | "random" | "randomized";
+            /** @description Отпечаток TLS (uTLS) у клиентов, если у подключения не задан свой: chrome, firefox, safari, ios, android, edge, 360, qq, random, randomized или своё значение */
+            client_fingerprint: string;
             /**
              * @description Язык админки и страницы подписки, пока человек не выбрал свой; auto — по языку браузера. На нём же названия по умолчанию: группа автовыбора и меню ненастроенного бота
              * @enum {string}
@@ -1557,16 +2195,27 @@ export interface components {
              * @description Час (UTC), когда пополняется пул слотов: переподключение QUIC-клиентов
              */
             quiet_hour_utc: number;
+            /** @description Куда правило может направить трафик: DIRECT, REJECT, REJECT-DROP, PROXY и группы */
+            rule_targets: string[];
             sub_base_url: string;
             /** @description Группа автовыбора самого быстрого подключения */
             sub_group_auto: string;
             /** @description Главная группа в Clash-приложениях */
             sub_group_main: string;
             /**
+             * Format: int64
+             * @description Отдельный порт подписок; 0 — порт панели. Порт панели отдаёт подписки в любом случае
+             */
+            sub_port: number;
+            /** @description sub_port_busy — сохранённый порт занят на сервере, подписки пока идут через порт панели */
+            sub_port_error?: string;
+            /**
              * @description Маршруты в Clash-приложениях: ru_direct — российские сайты и IP напрямую по геобазам mihomo, all — всё через VPN
              * @enum {string}
              */
             sub_routing: "ru_direct" | "all";
+            /** @description Свои правила Clash: по строке TYPE,VALUE,TARGET[,no-resolve]; # — комментарий */
+            sub_rules: string;
             support_url: string;
         };
         Status: {
@@ -1574,10 +2223,14 @@ export interface components {
             checked_at: string;
             error?: string;
             identifier: string;
+            issuer?: string;
             /** @enum {string} */
-            kind: "self-signed" | "letsencrypt";
+            kind: "self-signed" | "letsencrypt" | "custom";
+            names?: string[];
             /** Format: date-time */
             not_after: string;
+            /** @description Свой сертификат публично доверенный для адреса панели */
+            trusted?: boolean;
         };
         System: {
             /** Format: double */
@@ -1606,6 +2259,8 @@ export interface components {
             name: string;
             /** @description Продавать в боте и Mini App; нужна хотя бы одна цена */
             on_sale?: boolean;
+            /** @description Лимиты пулов трафика; не передан — без изменений */
+            pools?: components["schemas"]["PoolLimit"][];
             price_label?: string;
             /**
              * Format: int64
@@ -1645,6 +2300,8 @@ export interface components {
             name: string;
             /** @description Продаётся в боте и Mini App */
             on_sale: boolean;
+            /** @description Лимиты пулов трафика; пул не в списке — без лимита */
+            pools: components["schemas"]["PoolLimit"][];
             price_label: string;
             /**
              * Format: int64
@@ -1694,6 +2351,20 @@ export interface components {
             name: string;
             username: string;
         };
+        TelegramRoute: {
+            /**
+             * @description Напрямую с сервера панели, через её ноду или через прокси — когда Telegram на сервере заблокирован
+             * @enum {string}
+             */
+            mode: "direct" | "node" | "proxy";
+            /**
+             * Format: int64
+             * @description Нода, через которую идут запросы
+             */
+            node_id?: number;
+            /** @description Адрес прокси; пароль скрыт */
+            proxy?: string;
+        };
         TelegramView: {
             /**
              * Format: int64
@@ -1716,6 +2387,8 @@ export interface components {
             linked: number;
             /** @description Адрес Mini App; пусто — Telegram его не откроет: нет адреса или сертификат самоподписанный */
             mini_app_url: string;
+            /** @description Как бот ходит в Telegram */
+            route: components["schemas"]["TelegramRoute"];
             running: boolean;
             /** @description ID бота из токена */
             token_hint?: string;
@@ -1750,6 +2423,10 @@ export interface components {
         };
         TotpDisableInputBody: {
             code: string;
+            password: string;
+        };
+        TotpSetupInputBody: {
+            /** @description Пароль: без него украденная сессия включила бы 2FA на себя и закрыла вход владельцу */
             password: string;
         };
         TotpSetupOutputBody: {
@@ -1810,6 +2487,30 @@ export interface components {
             /** Format: int64 */
             limited: number;
         };
+        UserPoolView: {
+            /** @description Лимит пула и его пакеты исчерпаны: подключения пула не работают до сброса */
+            exhausted: boolean;
+            /**
+             * Format: int64
+             * @description Байты, оставшиеся в пакетах трафика пула: тратятся после лимита
+             */
+            extra: number;
+            name: string;
+            /** Format: int64 */
+            pool_id: number;
+            /**
+             * Format: int64
+             * @description Байты за период; null — без лимита
+             */
+            traffic_limit: number | null;
+            /** Format: int64 */
+            used_down: number;
+            /** Format: int64 */
+            used_up: number;
+        };
+        UserPoolsInputBody: {
+            pools: components["schemas"]["PoolLimit"][];
+        };
         UserView: {
             /**
              * Format: int64
@@ -1852,6 +2553,11 @@ export interface components {
             total_down: number;
             /** Format: int64 */
             total_up: number;
+            /**
+             * Format: int64
+             * @description Байты, оставшиеся в пакетах трафика основного лимита: тратятся после лимита тарифа
+             */
+            traffic_extra: number;
             /**
              * Format: int64
              * @description Байты за период; null — без лимита
@@ -1924,6 +2630,132 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    "list-addons": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AddonsView"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "update-addon": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PatchAddonInputBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AddonsView"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "install-addon": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AddonsView"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "remove-addon": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AddonsView"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
     "list-api-keys": {
         parameters: {
             query?: never;
@@ -2003,6 +2835,39 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "list-audit": {
+        parameters: {
+            query?: {
+                /** @description Записи до этого номера; 0 — самые новые */
+                before?: number;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditOutputBody"];
+                };
             };
             /** @description Error */
             default: {
@@ -2266,7 +3131,11 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TotpSetupInputBody"];
+            };
+        };
         responses: {
             /** @description OK */
             200: {
@@ -2670,6 +3539,136 @@ export interface operations {
             };
         };
     };
+    "get-node-cascade": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CascadeView"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "update-node-cascade": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CascadePatchInputBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CascadeView"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "set-node-certificate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NodeCertInputBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodeInfo"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "clear-node-certificate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
     "rekey-node": {
         parameters: {
             query?: never;
@@ -2866,11 +3865,137 @@ export interface operations {
             };
         };
     };
+    "list-packages": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PackageView"][];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "create-package": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PackageBody"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PackageView"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "update-package": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PackageBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PackageView"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "archive-package": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
     "list-payments": {
         parameters: {
             query?: {
                 status?: "pending" | "paid" | "applied" | "expired" | "failed" | "refunded" | "";
-                provider?: "stars" | "yookassa" | "cryptobot" | "";
+                provider?: string;
                 user_id?: number;
                 /** @description id последнего платежа предыдущей страницы */
                 before?: number;
@@ -2995,6 +4120,132 @@ export interface operations {
             };
         };
     };
+    "list-pools": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PoolView"][];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "create-pool": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PoolInputBody"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PoolView"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "delete-pool": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "rename-pool": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PoolPatchInputBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PoolView"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
     "list-presets": {
         parameters: {
             query?: never;
@@ -3074,6 +4325,66 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["SettingsView"];
                 };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "set-certificate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CertInputBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SettingsView"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "clear-certificate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Error */
             default: {
@@ -3852,6 +5163,138 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["UserView"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "user-grants": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GrantView"][];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "grant-traffic": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GrantInputBody"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GrantView"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "user-pools": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserPoolView"][];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ErrorModel"];
+                };
+            };
+        };
+    };
+    "set-user-pools": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UserPoolsInputBody"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserPoolView"][];
                 };
             };
             /** @description Error */

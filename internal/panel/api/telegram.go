@@ -4,12 +4,18 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/netip"
 	"regexp"
+	"slices"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 
+	"mikan/internal/panel/domain"
 	"mikan/internal/panel/settings"
+	"mikan/internal/panel/store/db"
 	"mikan/internal/panel/tgbot"
 )
 
@@ -28,6 +34,13 @@ type TelegramView struct {
 	Linked     int64              `json:"linked" doc:"Подписок, привязанных к Telegram"`
 	Accounts   int64              `json:"accounts" doc:"Аккаунтов Telegram с подписками"`
 	Broadcast  *TelegramBroadcast `json:"broadcast,omitempty" doc:"Последняя рассылка с запуска панели"`
+	Route      TelegramRoute      `json:"route" doc:"Как бот ходит в Telegram"`
+}
+
+type TelegramRoute struct {
+	Mode   string `json:"mode" enum:"direct,node,proxy" doc:"Напрямую с сервера панели, через её ноду или через прокси — когда Telegram на сервере заблокирован"`
+	NodeID int64  `json:"node_id,omitempty" doc:"Нода, через которую идут запросы"`
+	Proxy  string `json:"proxy,omitempty" doc:"Адрес прокси; пароль скрыт"`
 }
 
 // TelegramBroadcast is how far the last broadcast went.
@@ -51,6 +64,11 @@ type patchTelegramInput struct {
 		Enabled *bool         `json:"enabled,omitempty"`
 		Token   *string       `json:"token,omitempty" maxLength:"100" doc:"Токен от @BotFather; пустая строка — удалить"`
 		Config  *tgbot.Config `json:"config,omitempty"`
+		Route   *struct {
+			Mode   string  `json:"mode" enum:"direct,node,proxy"`
+			NodeID int64   `json:"node_id,omitempty" minimum:"0" doc:"Удалённая нода панели (mode=node)"`
+			Proxy  *string `json:"proxy,omitempty" maxLength:"512" doc:"socks5://user:pass@host:port, http://… или https://…; не передан — прежний (mode=proxy)"`
+		} `json:"route,omitempty" doc:"Перед сохранением панель проверяет, что Telegram отвечает этим путём"`
 	}
 }
 
@@ -69,15 +87,15 @@ type broadcastOutput struct {
 func (h *handlers) registerTelegram() {
 	tags := []string{"telegram"}
 	huma.Register(h.api, huma.Operation{OperationID: "get-telegram", Method: http.MethodGet, Path: "/api/v1/telegram", Summary: "Telegram-бот", Tags: tags}, h.getTelegram)
-	huma.Register(h.api, huma.Operation{OperationID: "update-telegram", Method: http.MethodPatch, Path: "/api/v1/telegram", Summary: "Настроить Telegram-бота", Tags: tags}, h.updateTelegram)
-	huma.Register(h.api, huma.Operation{OperationID: "telegram-broadcast", Method: http.MethodPost, Path: "/api/v1/telegram/broadcast", Summary: "Разослать сообщение всем в боте", Tags: tags, DefaultStatus: http.StatusAccepted}, h.broadcast)
+	huma.Register(h.api, huma.Operation{OperationID: "update-telegram", Metadata: sessionOnly, Extensions: sessionOnlyExt, Method: http.MethodPatch, Path: "/api/v1/telegram", Summary: "Настроить Telegram-бота", Tags: tags}, h.updateTelegram)
+	huma.Register(h.api, huma.Operation{OperationID: "telegram-broadcast", Metadata: sessionOnly, Extensions: sessionOnlyExt, Method: http.MethodPost, Path: "/api/v1/telegram/broadcast", Summary: "Разослать сообщение всем в боте", Tags: tags, DefaultStatus: http.StatusAccepted}, h.broadcast)
 	huma.Register(h.api, huma.Operation{OperationID: "unlink-telegram", Method: http.MethodDelete, Path: "/api/v1/users/{id}/telegram", Summary: "Отвязать подписку от Telegram", Tags: tags, DefaultStatus: http.StatusNoContent}, h.unlinkTelegram)
 }
 
 func (h *handlers) telegramView(ctx context.Context) (TelegramView, error) {
 	var v TelegramView
 	var err error
-	if v.Enabled, err = h.d.Settings.Bool(ctx, tgbot.KeyEnabled, false); err != nil {
+	if v.Enabled, err = h.d.Settings.On(ctx, tgbot.Enabled); err != nil {
 		return v, err
 	}
 	token, err := h.d.Settings.String(ctx, tgbot.KeyToken)
@@ -109,6 +127,13 @@ func (h *handlers) telegramView(ctx context.Context) (TelegramView, error) {
 		v.Config = tgbot.Default(lang)
 	}
 	v.Defaults = tgbot.DefaultTexts(v.Config.Lang)
+	route := tgbot.Route{Mode: tgbot.RouteDirect}
+	if h.d.Telegram != nil {
+		if route, err = h.d.Telegram.LoadRoute(ctx); err != nil {
+			return v, err
+		}
+	}
+	v.Route = TelegramRoute{Mode: route.Mode, NodeID: route.NodeID, Proxy: tgbot.MaskProxy(route.Proxy)}
 	if v.Linked, err = h.d.Store.Q.CountTgLinks(ctx); err != nil {
 		return v, err
 	}
@@ -147,58 +172,95 @@ func (h *handlers) updateTelegram(ctx context.Context, in *patchTelegramInput) (
 	}
 	b := in.Body
 	details := map[string]any{}
+	// Everything is checked before anything is written: a refused field leaves the bot as
+	// it was, not half changed.
+	route, err := h.d.Telegram.LoadRoute(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if b.Route != nil {
+		if route, err = h.nextRoute(ctx, route, b.Route.Mode, b.Route.NodeID, b.Route.Proxy, details); err != nil {
+			return nil, err
+		}
+	}
+	token, err := h.d.Settings.String(ctx, tgbot.KeyToken)
+	if err != nil {
+		return nil, err
+	}
+	var bot *tgbot.User
 	if b.Token != nil {
-		switch {
-		case *b.Token == "":
-			if err := settings.Set(ctx, h.d.Settings, tgbot.KeyToken, ""); err != nil {
-				return nil, err
-			}
-			if err := settings.Set(ctx, h.d.Settings, tgbot.KeyEnabled, false); err != nil {
-				return nil, err
-			}
+		token = *b.Token
+		if token == "" {
 			details["token"] = "removed"
-		default:
-			if _, _, ok := cutToken(*b.Token); !ok {
+		} else {
+			if _, _, ok := cutToken(token); !ok {
 				return nil, tgFieldErr("token", "tg_token_format")
 			}
-			me, err := h.d.Telegram.CheckToken(ctx, *b.Token)
+			// Through the route as it will be: a new route is proven by the token's check.
+			me, err := h.d.Telegram.CheckTokenVia(ctx, token, route)
 			var ae *tgbot.APIError
 			switch {
 			case errors.As(err, &ae) && (ae.Code == 401 || ae.Code == 404):
 				return nil, tgFieldErr("token", "tg_token_invalid")
+			case err != nil && b.Route != nil && route.Mode != tgbot.RouteDirect:
+				return nil, tgFieldErr("route", "tg_route_unreachable")
 			case err != nil:
 				return nil, huma.Error502BadGateway("tg_unreachable")
 			}
-			if err := settings.Set(ctx, h.d.Settings, tgbot.KeyToken, *b.Token); err != nil {
-				return nil, err
-			}
-			if err := settings.Set(ctx, h.d.Settings, tgbot.KeyBot, me); err != nil {
-				return nil, err
-			}
+			bot = &me
 			details["token"], details["bot"] = "set", me.Username
 		}
 	}
-	if b.Config != nil {
-		cfg := *b.Config
-		if err := cfg.Validate(); err != nil {
-			return nil, tgFieldErr("config", err.Error())
+	if b.Route != nil && route.Mode != tgbot.RouteDirect && bot == nil {
+		if err := h.d.Telegram.CheckRoute(ctx, route, token); err != nil {
+			return nil, tgFieldErr("route", "tg_route_unreachable")
 		}
-		if err := settings.Set(ctx, h.d.Settings, tgbot.KeyConfig, cfg); err != nil {
-			return nil, err
+	}
+	if b.Config != nil {
+		if err := b.Config.Validate(); err != nil {
+			return nil, tgFieldErr("config", err.Error())
 		}
 		details["config"] = true
 	}
+	if b.Enabled != nil && *b.Enabled && token == "" {
+		return nil, tgFieldErr("enabled", "tg_no_token")
+	}
+
+	// One transaction: a token saved without the route that reaches it, or a route without
+	// the switch that turns the bot on, is a bot that does not start.
+	err = h.d.Store.Tx(ctx, func(q *db.Queries) error {
+		set := settings.New(q)
+		if b.Route != nil {
+			if err := settings.Set(ctx, set, tgbot.KeyRoute, route); err != nil {
+				return err
+			}
+		}
+		if b.Token != nil {
+			if err := settings.Set(ctx, set, tgbot.KeyToken, token); err != nil {
+				return err
+			}
+			if bot != nil {
+				if err := settings.Set(ctx, set, tgbot.KeyBot, *bot); err != nil {
+					return err
+				}
+			} else if err := settings.Set(ctx, set, tgbot.KeyEnabled, false); err != nil {
+				return err
+			}
+		}
+		if b.Config != nil {
+			if err := settings.Set(ctx, set, tgbot.KeyConfig, *b.Config); err != nil {
+				return err
+			}
+		}
+		if b.Enabled != nil {
+			return settings.Set(ctx, set, tgbot.KeyEnabled, *b.Enabled)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
 	if b.Enabled != nil {
-		token, err := h.d.Settings.String(ctx, tgbot.KeyToken)
-		if err != nil {
-			return nil, err
-		}
-		if *b.Enabled && token == "" {
-			return nil, tgFieldErr("enabled", "tg_no_token")
-		}
-		if err := settings.Set(ctx, h.d.Settings, tgbot.KeyEnabled, *b.Enabled); err != nil {
-			return nil, err
-		}
 		details["enabled"] = *b.Enabled
 	}
 	h.d.Telegram.Reload()
@@ -208,6 +270,65 @@ func (h *handlers) updateTelegram(ctx context.Context, in *patchTelegramInput) (
 		return nil, err
 	}
 	return &telegramOutput{Body: v}, nil
+}
+
+// proxyHostOK: where the bot may connect as its proxy. A proxy next to the panel (an
+// address on this host or the LAN) is the admin's explicit choice, so a literal address is
+// fine; a name that leads to this host itself or to the metadata address is not: it is how
+// an internal service is reached through a harmless-looking name. The name is looked up
+// here, and a name that cannot be is let through, the check made on route is the real one.
+func (h *handlers) proxyHostOK(ctx context.Context, host string) bool {
+	inside := func(a netip.Addr) bool {
+		a = a.Unmap()
+		return a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsLinkLocalMulticast() || a.IsUnspecified() || a.IsMulticast()
+	}
+	if a, err := netip.ParseAddr(host); err == nil {
+		return !(a.IsLinkLocalUnicast() || a.IsLinkLocalMulticast() || a.IsUnspecified() || a.IsMulticast())
+	}
+	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
+		return true
+	}
+	resolve := h.d.Resolve
+	if resolve == nil {
+		resolve = domain.SystemResolve
+	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	addrs, err := resolve(ctx, host)
+	if err != nil {
+		return true
+	}
+	return !slices.ContainsFunc(addrs, inside)
+}
+
+// nextRoute checks a route change; nothing is saved here.
+func (h *handlers) nextRoute(ctx context.Context, r tgbot.Route, mode string, nodeID int64, proxy *string, details map[string]any) (tgbot.Route, error) {
+	r.Mode = mode
+	switch mode {
+	case tgbot.RouteNode:
+		n, err := h.d.Store.Q.GetNode(ctx, nodeID)
+		if err != nil || n.Address == "" {
+			// The panel's own node shares its server, and with it the block.
+			return r, tgFieldErr("route", "tg_route_node")
+		}
+		r.NodeID = n.ID
+		details["route"], details["node"] = mode, n.Name
+	case tgbot.RouteProxy:
+		if proxy != nil {
+			r.Proxy = strings.TrimSpace(*proxy)
+		}
+		u, err := tgbot.ParseProxy(r.Proxy)
+		if err != nil {
+			return r, tgFieldErr("route", "tg_proxy_invalid")
+		}
+		if !h.proxyHostOK(ctx, u.Hostname()) {
+			return r, tgFieldErr("route", "tg_proxy_private")
+		}
+		details["route"], details["proxy"] = mode, tgbot.ProxyHost(r.Proxy)
+	default:
+		details["route"] = mode
+	}
+	return r, nil
 }
 
 func (h *handlers) broadcast(ctx context.Context, in *broadcastInput) (*broadcastOutput, error) {

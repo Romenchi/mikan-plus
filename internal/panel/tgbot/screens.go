@@ -59,11 +59,20 @@ func (b *Bot) screen(ctx context.Context, cfg Config, chat int64, data, notice s
 	case "s":
 		lines := []string{"<b>" + html.EscapeString(fmt.Sprintf(w.subTitle, u.Name)) + "</b>", html.EscapeString(vars["state"]), "",
 			"📅 " + html.EscapeString(vars["term"]), "📦 " + html.EscapeString(vars["traffic"])}
+		for _, p := range b.poolLines(ctx, w, u.ID) {
+			lines = append(lines, "📦 "+html.EscapeString(p))
+		}
 		if r := vars["reset"]; r != "" {
 			lines = append(lines, html.EscapeString(fmt.Sprintf(w.resets, r)))
 		}
 		lines = append(lines, "📱 "+html.EscapeString(vars["devices"]))
-		return withNotice(strings.Join(lines, "\n")), &Keyboard{[][]Button{back}}
+		rows := [][]Button{}
+		if offers := b.packageOffers(ctx, u.ID); len(offers) > 0 {
+			rows = append(rows, []Button{{Text: w.buyTraffic, CallbackData: "x"}})
+		}
+		return withNotice(strings.Join(lines, "\n")), &Keyboard{append(rows, back)}
+	case "x", "xk", "xp":
+		return b.trafficShop(ctx, w, chat, u, cmd, arg, notice)
 	case "d", "dc":
 		id, _ := strconv.ParseInt(arg, 10, 64)
 		return b.devices(ctx, w, u, cmd, id, notice, now)
@@ -185,7 +194,7 @@ func (b *Bot) pageButton(ctx context.Context, cfg Config, w *words, label string
 
 func (b *Bot) devices(ctx context.Context, w *words, u db.User, cmd string, id int64, notice string, now time.Time) (string, *Keyboard) {
 	back := []Button{{Text: w.back, CallbackData: "m"}}
-	binding, _ := b.d.Settings.Bool(ctx, settings.KeyDeviceBinding, true)
+	binding, _ := b.d.Settings.On(ctx, settings.DeviceBinding)
 	head := "<b>" + w.devicesTitle + "</b> · " + html.EscapeString(b.vars(ctx, w, u, now)["devices"])
 	if !binding {
 		limit := "∞"
@@ -294,7 +303,12 @@ func (b *Bot) when(w *words, t time.Time) string {
 
 // vars are the {variables} of the admin's texts for one subscription.
 func (b *Bot) vars(ctx context.Context, w *words, u db.User, now time.Time) map[string]string {
-	state := domain.State(u, now)
+	grants, err := domain.UserGrantsLeft(ctx, b.d.Store.Q, u.ID, now)
+	if err != nil {
+		b.d.Log.Warn("telegram: traffic packages", "err", err)
+	}
+	extra := grants.Main(u.ID)
+	state := domain.State(u, extra, now)
 	v := map[string]string{"name": u.Name, "brand": b.brand(ctx), "until": w.forever, "days": "—", "term": w.forever, "reset": ""}
 	switch state {
 	case domain.StateActive:
@@ -319,8 +333,8 @@ func (b *Bot) vars(ctx context.Context, w *words, u db.User, now time.Time) map[
 	v["used"] = w.bytes(used)
 	if u.TrafficLimit.Valid {
 		v["limit"] = w.bytes(u.TrafficLimit.Int64)
-		v["left"] = w.bytes(max(0, u.TrafficLimit.Int64-used))
-		v["traffic"] = fmt.Sprintf(w.trafficOf, v["used"], v["limit"])
+		v["left"] = w.bytes(domain.TrafficLeft(u.TrafficLimit, used, extra))
+		v["traffic"] = fmt.Sprintf(w.trafficOf, v["used"], w.withPackages(u.TrafficLimit.Int64, extra))
 	} else {
 		v["limit"], v["left"] = w.noLimit, w.noLimit
 		v["traffic"] = fmt.Sprintf(w.trafficNoLimit, v["used"])
@@ -337,7 +351,7 @@ func (b *Bot) vars(ctx context.Context, w *words, u db.User, now time.Time) map[
 }
 
 func (b *Bot) brand(ctx context.Context) string {
-	if s, _ := b.d.Settings.String(ctx, "brand"); s != "" {
+	if s, _ := b.d.Settings.String(ctx, settings.KeyBrand); s != "" {
 		return s
 	}
 	return "VPN"
@@ -345,7 +359,7 @@ func (b *Bot) brand(ctx context.Context) string {
 
 // supportURL is the panel's support link when Telegram can open it.
 func (b *Bot) supportURL(ctx context.Context) string {
-	s, _ := b.d.Settings.String(ctx, "support_url")
+	s, _ := b.d.Settings.String(ctx, settings.KeySupportURL)
 	if safeURL(s) {
 		return s
 	}
@@ -357,4 +371,37 @@ func (b *Bot) subURL(ctx context.Context, u db.User) string {
 		return base + "/" + u.SubToken
 	}
 	return ""
+}
+
+// poolLines: one line per traffic pool with a limit — "WL: 30 GB of 100 GB + packages 50 GB".
+func (b *Bot) poolLines(ctx context.Context, w *words, userID int64) []string {
+	rows, err := b.d.Store.Q.ListUserPools(ctx, userID)
+	if err != nil || len(rows) == 0 {
+		return nil
+	}
+	pools, err := b.d.Store.Q.ListTrafficPools(ctx)
+	if err != nil {
+		return nil
+	}
+	grants, err := domain.UserGrantsLeft(ctx, b.d.Store.Q, userID, b.d.Now())
+	if err != nil {
+		return nil
+	}
+	names := map[int64]string{}
+	for _, p := range pools {
+		names[p.ID] = p.Name
+	}
+	var out []string
+	for _, r := range rows {
+		if !r.TrafficLimit.Valid {
+			continue
+		}
+		extra := grants.Pool(userID, r.PoolID)
+		line := names[r.PoolID] + ": " + fmt.Sprintf(w.trafficOf, w.bytes(r.UsedUp+r.UsedDown), w.withPackages(r.TrafficLimit.Int64, extra))
+		if domain.PoolExhausted(r, extra) {
+			line += " — " + w.poolOut
+		}
+		out = append(out, line)
+	}
+	return out
 }

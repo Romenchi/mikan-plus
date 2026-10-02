@@ -1,9 +1,6 @@
-import * as SwitchPrimitive from "@radix-ui/react-switch";
 import clsx from "clsx";
 import { LoaderCircle, SearchX, TriangleAlert, UserRound } from "lucide-react";
-import type { ButtonHTMLAttributes, CSSProperties, ReactNode } from "react";
-import { useMemo } from "react";
-import { renderSVG } from "uqr";
+import { cloneElement, isValidElement, lazy, Suspense, useId, type ButtonHTMLAttributes, type CSSProperties, type ReactElement, type ReactNode } from "react";
 import type { UserState } from "../api/client";
 import { t } from "../i18n";
 
@@ -69,14 +66,6 @@ export function Avatar({ name, seed, size }: { name: string; seed: number; size?
   );
 }
 
-export function Switch({ checked, onChange, label, disabled }: { checked: boolean; onChange: (v: boolean) => void; label: string; disabled?: boolean }) {
-  return (
-    <SwitchPrimitive.Root className="switch" checked={checked} onCheckedChange={onChange} aria-label={label} disabled={disabled}>
-      <SwitchPrimitive.Thumb className="thumb" />
-    </SwitchPrimitive.Root>
-  );
-}
-
 export function Segmented<T extends string>({ value, options, onChange, label }: { value: T; options: { value: T; label: string }[]; onChange: (v: T) => void; label: string }) {
   return (
     <div className="seg" role="group" aria-label={label}>
@@ -89,10 +78,18 @@ export function Segmented<T extends string>({ value, options, onChange, label }:
   );
 }
 
-export function Bar({ pct, className }: { pct: number; className?: string }) {
+/**
+ * A bar. Beside its number it is decoration; give it a `label` and it is a progressbar
+ * of its own, with the value for a screen reader.
+ */
+export function Bar({ pct, className, label }: { pct: number; className?: string; label?: string }) {
+  const v = Math.max(0, Math.min(100, pct));
   return (
-    <div className={clsx("bar", className)} role="presentation">
-      <i style={{ width: `${Math.max(0, Math.min(100, pct))}%` }} />
+    <div
+      className={clsx("bar", className)}
+      {...(label ? { role: "progressbar", "aria-label": label, "aria-valuemin": 0, "aria-valuemax": 100, "aria-valuenow": Math.round(v) } : { "aria-hidden": true })}
+    >
+      <i style={{ width: `${v}%` }} />
     </div>
   );
 }
@@ -127,9 +124,15 @@ export function Ring({ pct, label, sub, size = 112 }: { pct: number; label: Reac
   );
 }
 
+const QRCode = lazy(() => import("./qr"));
+
+/** A QR code of `value`; the encoder is a chunk of its own, fetched when a code first shows. */
 export function QR({ value, size = 136, label }: { value: string; size?: number; label?: string }) {
-  const svg = useMemo(() => renderSVG(value, { ecc: "M", border: 1, blackColor: "#161A24", whiteColor: "#FFFFFF" }), [value]);
-  return <div className="qr" style={{ width: size, height: size }} role="img" aria-label={label ?? t("common.qrLabel")} dangerouslySetInnerHTML={{ __html: svg }} />;
+  return (
+    <Suspense fallback={<Skeleton style={{ width: size, height: size, borderRadius: 16 }} />}>
+      <QRCode value={value} size={size} label={label} />
+    </Suspense>
+  );
 }
 
 export function Skeleton({ className, style }: { className?: string; style?: CSSProperties }) {
@@ -137,7 +140,7 @@ export function Skeleton({ className, style }: { className?: string; style?: CSS
 }
 
 export function Spinner({ size = 16 }: { size?: number }) {
-  return <LoaderCircle size={size} className="spin" aria-label={t("common.loading")} />;
+  return <LoaderCircle size={size} className="spin" role="img" aria-label={t("common.loading")} />;
 }
 
 export function EmptyState({ title, text, children, search }: { title: string; text: ReactNode; children?: ReactNode; search?: boolean }) {
@@ -168,17 +171,28 @@ export function ErrorState({ title, text, onRetry }: { title?: string; text: str
   );
 }
 
+/**
+ * A labelled field with its hint or error. With `htmlFor` the label belongs to that input
+ * and the hint/error is tied to it (aria-describedby, put on the input when it is the
+ * direct child); without it the label names the group of controls inside (a segmented
+ * switch, a select next to a switch).
+ */
 export function Field({ label, htmlFor, hint, error, children }: { label: string; htmlFor?: string; hint?: ReactNode; error?: string; children: ReactNode }) {
+  const uid = useId();
+  const noteId = error || hint ? `${uid}-note` : undefined;
+  const control = htmlFor && noteId && isValidElement<{ id?: string; "aria-describedby"?: string }>(children) && children.props.id === htmlFor ? children : null;
   return (
-    <div className="field">
-      {htmlFor ? <label htmlFor={htmlFor}>{label}</label> : <span className="lbl">{label}</span>}
-      {children}
+    <div className="field" {...(htmlFor ? {} : { role: "group", "aria-labelledby": `${uid}-label` })}>
+      {htmlFor ? <label htmlFor={htmlFor}>{label}</label> : <span className="lbl" id={`${uid}-label`}>{label}</span>}
+      {control ? cloneElement(control as ReactElement<{ "aria-describedby"?: string }>, { "aria-describedby": [control.props["aria-describedby"], noteId].filter(Boolean).join(" ") }) : children}
       {error ? (
-        <span className="err" role="alert">
+        <span className="err" role="alert" id={noteId}>
           {error}
         </span>
       ) : hint ? (
-        <span className="hint">{hint}</span>
+        <span className="hint" id={noteId}>
+          {hint}
+        </span>
       ) : null}
     </div>
   );

@@ -4,10 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"math/rand/v2"
-	"net"
-	"net/netip"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +17,7 @@ import (
 	"mikan/internal/panel/store"
 	"mikan/internal/panel/store/db"
 	"mikan/internal/proto"
+	"mikan/internal/scan"
 )
 
 // Nodes is what the tuner needs from the running nodes (nodesync.Manager).
@@ -77,21 +75,29 @@ type Status struct {
 	TargetAt    time.Time
 }
 
-// Tuner detects blocked inbounds and moves them. Step is not reentrant: Run calls it.
+// Tuner detects blocked inbounds and moves them. Rounds are serialized (stepMu): Run and
+// anything that asks for one wait for each other.
 type Tuner struct {
-	st      *store.Store
-	set     *settings.Settings
-	nodes   Nodes
-	changes domain.Changes
-	log     *slog.Logger
-	now     func() time.Time
-	o       Options
-	pick    func(n int) int // index of the port to move to; random unless a test fixes it
+	st       *store.Store
+	inbounds *domain.Inbounds // moves ports by the admin's rules, without a dry run on the node
+	set      *settings.Settings
+	nodes    Nodes
+	changes  domain.Changes
+	log      *slog.Logger
+	now      func() time.Time
+	o        Options
+	pick     func(n int) int // index of the port to move to; random unless a test fixes it
+
+	stepMu sync.Mutex    // one round at a time
+	round  time.Duration // overrides roundTimeout; tests only
 
 	mu    sync.Mutex
 	state map[int64]*state // by inbound id
 
-	failed    map[string]time.Time // targets that failed a check lately: not picked again
+	// What only a round touches: its own timings, and the targets that failed a check lately
+	// (not picked again). The target checks of a round run side by side and note failures
+	// under mu; a replacement reads them once the checks are over.
+	failed    map[string]time.Time
 	checkedAt time.Time
 	prunedAt  time.Time
 }
@@ -102,7 +108,7 @@ type state struct {
 }
 
 func New(st *store.Store, set *settings.Settings, nodes Nodes, changes domain.Changes, log *slog.Logger, now func() time.Time, o Options) *Tuner {
-	return &Tuner{st: st, set: set, nodes: nodes, changes: changes, log: log, now: now, o: o, pick: rand.IntN,
+	return &Tuner{st: st, inbounds: domain.NewInbounds(st, nil, now), set: set, nodes: nodes, changes: changes, log: log, now: now, o: o, pick: rand.IntN,
 		state: map[int64]*state{}, failed: map[string]time.Time{}}
 }
 
@@ -146,8 +152,22 @@ type world struct {
 	eventsWindow time.Duration
 }
 
+// roundTimeout is the most a round may take: a node that does not answer holds a check for
+// 15 seconds and a scan for 45, and a round must end before the next tick for the
+// detector to run on time.
+func (t *Tuner) roundTimeout() time.Duration {
+	if t.round > 0 {
+		return t.round
+	}
+	return max(t.o.Tick, 2*time.Minute)
+}
+
 // Step runs a detector round over all nodes and, when due, a target round.
 func (t *Tuner) Step(ctx context.Context) {
+	t.stepMu.Lock()
+	defer t.stepMu.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, t.roundTimeout())
+	defer cancel()
 	w, err := t.load(ctx)
 	if err != nil {
 		t.log.Error("autotune: load", "err", err)
@@ -172,11 +192,13 @@ func (t *Tuner) Step(ctx context.Context) {
 		if err := t.st.Q.PruneInboundReach(ctx, w.now.Add(-reachKeep).Unix()); err != nil {
 			t.log.Error("autotune: prune reach", "err", err)
 		}
+		t.mu.Lock()
 		for dest, at := range t.failed {
 			if w.now.Sub(at) >= 24*time.Hour {
 				delete(t.failed, dest)
 			}
 		}
+		t.mu.Unlock()
 	}
 }
 
@@ -197,10 +219,10 @@ func (t *Tuner) load(ctx context.Context) (*world, error) {
 		eventsWindow: max(t.o.ChangesWindow, t.o.Abandon, t.o.Cooldown)}
 	q := t.st.Q
 	var err error
-	if w.portOn, err = t.set.Bool(ctx, settings.KeyAutoPort, true); err != nil {
+	if w.portOn, err = t.set.On(ctx, settings.AutoPort); err != nil {
 		return nil, err
 	}
-	if w.sniOn, err = t.set.Bool(ctx, settings.KeyAutoSNI, true); err != nil {
+	if w.sniOn, err = t.set.On(ctx, settings.AutoSNI); err != nil {
 		return nil, err
 	}
 	own := func(name string) {
@@ -434,7 +456,8 @@ func (t *Tuner) remedy(ctx context.Context, w *world, n db.Node, x db.Inbound) {
 		return
 	}
 	dest, _ := presets.Dest(tpl)
-	portOK := w.portOn && x.AutoPort != 0 && !strings.Contains(x.Port, "-") // hopping ranges are the admin's
+	// Hopping ranges are the admin's, and so is a port a proxy in front forwards to.
+	portOK := w.portOn && x.AutoPort != 0 && !strings.Contains(x.Port, "-") && !domain.ListenPinsPort(x.Listen)
 	sniOK := w.sniOn && x.AutoSni != 0 && dest != ""
 	h := t.history(w, x.ID)
 	switch {
@@ -475,11 +498,10 @@ func (t *Tuner) remedy(ctx context.Context, w *world, n db.Node, x db.Inbound) {
 
 func (t *Tuner) movePort(ctx context.Context, w *world, n db.Node, x db.Inbound, reason string) {
 	network := domain.InboundNetwork(x)
-	reserved := map[string]bool{"22": true}
-	if n.Address == "" {
-		reserved[strconv.Itoa(w.panelPort)] = true
-	} else if _, p, err := net.SplitHostPort(n.Address); err == nil {
-		reserved[p] = true
+	ports, err := domain.NodePorts(ctx, t.st.Q, n)
+	if err != nil {
+		t.log.Error("autotune: node ports", "node", n.ID, "err", err)
+		return
 	}
 	abandoned := map[string]bool{x.Port: true}
 	for _, e := range w.events {
@@ -487,12 +509,13 @@ func (t *Tuner) movePort(ctx context.Context, w *world, n db.Node, x db.Inbound,
 			abandoned[e.OldValue] = true
 		}
 	}
-	free := FreePorts(w.inbounds[n.ID], network, reserved, abandoned)
+	free := FreePorts(ports, network, abandoned)
 	if len(free) == 0 {
 		t.setStuck(x.ID, "no_port")
 		return
 	}
-	prev, next, err := domain.SetInboundPort(ctx, t.st, n.ID, x.Name, free[t.pick(len(free))], w.now)
+	port := free[t.pick(len(free))]
+	prev, next, err := t.inbounds.Update(ctx, x.ID, domain.InboundPatch{Port: &port})
 	if err != nil {
 		t.log.Error("autotune: move port", "node", n.ID, "inbound", x.Name, "err", err)
 		return
@@ -524,7 +547,7 @@ func (t *Tuner) checkTarget(ctx context.Context, nodeID int64, x db.Inbound, tpl
 	now := t.now()
 	t.mu.Lock()
 	s = t.stateLocked(x.ID)
-	s.TargetOK, s.TargetError, s.TargetAt = r.OK, targetProblem(r), now
+	s.TargetOK, s.TargetError, s.TargetAt = r.OK, scan.Problem(r), now
 	if r.OK {
 		s.fails = 0
 	} else {
@@ -535,51 +558,89 @@ func (t *Tuner) checkTarget(ctx context.Context, nodeID int64, x db.Inbound, tpl
 	return r, nil
 }
 
-// targetProblem names why a target does not suit REALITY, "" when it does.
-func targetProblem(r nodeapi.TargetResult) string {
-	switch {
-	case r.OK:
-		return ""
-	case r.Error != "":
-		return r.Error
-	case !r.TLS13:
-		return "no_tls13"
-	case !r.X25519:
-		return "no_x25519"
-	case !r.H2:
-		return "no_h2"
-	default:
-		return "cert"
+// checkTargets checks every REALITY target and replaces one that failed TargetFails
+// checks in a row. Targets are checked even with replacement off: the admin sees them.
+// The nodes are asked side by side, one goroutine each (a node that does not answer holds
+// only its own checks), and a site shared by several inbounds of a node is asked about
+// once; the replacements, which read what the checks found, follow in the nodes' order.
+func (t *Tuner) checkTargets(ctx context.Context, w *world) {
+	type candidate struct {
+		n   db.Node
+		x   db.Inbound
+		tpl proto.Template
+	}
+	found := make([][]candidate, len(w.nodes))
+	var wg sync.WaitGroup
+	for i, n := range w.nodes {
+		wg.Go(func() {
+			seen := map[string]*nodeapi.TargetResult{} // dest/sni → the answer, nil: it failed to be asked
+			for _, x := range w.inbounds[n.ID] {
+				if x.Enabled == 0 || ctx.Err() != nil {
+					continue
+				}
+				tpl, err := proto.Parse(x.Config)
+				if err != nil {
+					continue
+				}
+				dest, names := presets.Dest(tpl)
+				if dest == "" {
+					continue
+				}
+				key := strings.ToLower(dest)
+				if len(names) > 0 {
+					key += "/" + strings.ToLower(names[0])
+				}
+				if prev, ok := seen[key]; ok {
+					if prev != nil {
+						t.noteTarget(x.ID, dest, *prev)
+						if !prev.OK {
+							found[i] = append(found[i], candidate{n, x, tpl})
+						}
+					}
+					continue
+				}
+				r, err := t.checkTarget(ctx, n.ID, x, tpl, true)
+				if err != nil {
+					seen[key] = nil
+					continue
+				}
+				seen[key] = &r
+				if !r.OK {
+					found[i] = append(found[i], candidate{n, x, tpl})
+				}
+			}
+		})
+	}
+	wg.Wait()
+	for _, list := range found {
+		for _, c := range list {
+			if ctx.Err() != nil {
+				return
+			}
+			t.mu.Lock()
+			fails := t.stateLocked(c.x.ID).fails
+			t.mu.Unlock()
+			h := t.history(w, c.x.ID)
+			if fails >= t.o.TargetFails && w.sniOn && c.x.AutoSni != 0 && w.now.Sub(h.lastSNI) >= t.o.Cooldown && h.recent < t.o.MaxChanges {
+				t.replaceTarget(ctx, w, c.n, c.x, c.tpl, "target_down")
+			}
+		}
 	}
 }
 
-// checkTargets checks every REALITY target and replaces one that failed TargetFails
-// checks in a row. Targets are checked even with replacement off: the admin sees them.
-func (t *Tuner) checkTargets(ctx context.Context, w *world) {
-	for _, n := range w.nodes {
-		for _, x := range w.inbounds[n.ID] {
-			if x.Enabled == 0 {
-				continue
-			}
-			tpl, err := proto.Parse(x.Config)
-			if err != nil {
-				continue
-			}
-			if dest, _ := presets.Dest(tpl); dest == "" {
-				continue
-			}
-			r, err := t.checkTarget(ctx, n.ID, x, tpl, true)
-			if err != nil || r.OK {
-				continue
-			}
-			t.mu.Lock()
-			fails := t.stateLocked(x.ID).fails
-			t.mu.Unlock()
-			h := t.history(w, x.ID)
-			if fails >= t.o.TargetFails && w.sniOn && x.AutoSni != 0 && w.now.Sub(h.lastSNI) >= t.o.Cooldown && h.recent < t.o.MaxChanges {
-				t.replaceTarget(ctx, w, n, x, tpl, "target_down")
-			}
-		}
+// noteTarget records, for an inbound that shares a site with one already checked, the
+// answer of that check.
+func (t *Tuner) noteTarget(inbound int64, dest string, r nodeapi.TargetResult) {
+	now := t.now()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	s := t.stateLocked(inbound)
+	s.TargetOK, s.TargetError, s.TargetAt = r.OK, scan.Problem(r), now
+	if r.OK {
+		s.fails = 0
+	} else {
+		s.fails++
+		t.failed[strings.ToLower(dest)] = now
 	}
 }
 
@@ -628,22 +689,11 @@ func (t *Tuner) replaceTarget(ctx context.Context, w *world, n db.Node, x db.Inb
 		t.setStuck(x.ID, "no_target")
 		return false
 	}
-	if err := presets.SetDest(tpl, pick.Dest, pick.SNI); err != nil {
-		t.log.Error("autotune: set target", "inbound", x.Name, "err", err)
-		return false
-	}
-	var opts proto.Options
-	if n.Address == "" {
-		opts.SelfStealPort = w.panelPort
-	}
-	if err := proto.Validate(tpl, opts); err != nil {
-		t.log.Error("autotune: new target", "inbound", x.Name, "err", err)
-		return false
-	}
-	next, err := t.st.Q.UpdateInbound(ctx, db.UpdateInboundParams{Port: x.Port, Enabled: x.Enabled, Config: proto.Marshal(tpl), DisplayName: x.DisplayName,
-		UpdatedAt: w.now.Unix(), ID: x.ID})
+	// The scan above took minutes at most; the admin may have edited the inbound meanwhile.
+	// Update applies the new target to the row as it is now, not to the round's snapshot.
+	_, next, err := t.inbounds.Update(ctx, x.ID, domain.InboundPatch{Dest: &pick.Dest, ServerName: &pick.SNI})
 	if err != nil {
-		t.log.Error("autotune: save target", "inbound", x.Name, "err", err)
+		t.log.Error("autotune: new target", "inbound", x.Name, "err", err)
 		return false
 	}
 	old := oldDest
@@ -660,14 +710,7 @@ func (t *Tuner) nodeIP(ctx context.Context, w *world, n db.Node) (string, error)
 	if n.Address == "" {
 		host = w.panelHost
 	}
-	if a, err := netip.ParseAddr(host); err == nil {
-		return a.String(), nil
-	}
-	addrs, err := net.DefaultResolver.LookupNetIP(ctx, "ip4", host)
-	if err != nil || len(addrs) == 0 {
-		return "", &net.DNSError{Err: "no IPv4 address", Name: host}
-	}
-	return addrs[0].String(), nil
+	return scan.ResolveIPv4(ctx, host)
 }
 
 // changed records an automatic change and pushes it to the node. Clients get it with

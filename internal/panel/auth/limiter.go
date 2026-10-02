@@ -38,10 +38,28 @@ func (l *Limiter) Allowed(key string, now time.Time) (bool, time.Duration) {
 	return false, e.blockedUntil.Sub(now)
 }
 
+// Reserve is Allowed and Fail in one step, under one lock: a blocked key is refused, any
+// other attempt is counted at once. Checking first and counting after the password was
+// hashed let any number of parallel attempts through the same open window; here only
+// maxFails of them get past. A success hands its attempt back with Reset. blocked tells
+// that this attempt used up the key's allowance.
+func (l *Limiter) Reserve(key string, now time.Time) (ok bool, wait time.Duration, blocked bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if e := l.entries[key]; e != nil && now.Before(e.blockedUntil) {
+		return false, e.blockedUntil.Sub(now), true
+	}
+	return true, 0, l.failLocked(key, now)
+}
+
 // Fail records a failed attempt and returns true if the key just became blocked.
 func (l *Limiter) Fail(key string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.failLocked(key, now)
+}
+
+func (l *Limiter) failLocked(key string, now time.Time) bool {
 	e := l.entries[key]
 	if e == nil {
 		e = &limitEntry{}

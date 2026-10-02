@@ -1,12 +1,16 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Copy, KeyRound, Plus, Trash2 } from "lucide-react";
+import { Link } from "@tanstack/react-router";
+import { ChevronLeft, Copy, KeyRound, Plus, Trash2 } from "lucide-react";
 import { lazy, Suspense, useState, type FormEvent } from "react";
-import { api, ApiError, errorText, unwrap, type Schemas } from "../../api/client";
-import { qk } from "../../api/hooks";
+import { api, errorText, unwrap, type Schemas } from "../../api/client";
+import { meQuery, qk } from "../../api/hooks";
 import { Confirm, Drawer } from "../../components/overlay";
+import { QueryBoundary } from "../../components/query";
 import { useToast } from "../../components/toast";
-import { Button, EmptyState, ErrorState, Field, PageHeader, Segmented, Skeleton } from "../../components/ui";
+import { Button, EmptyState, Field, PageHeader, Segmented, Skeleton } from "../../components/ui";
 import { t } from "../../i18n";
+import { useCopy } from "../../lib/copy";
+import { fieldErrors } from "../../lib/fields";
 import { ago, dateShort } from "../../lib/format";
 
 // The reference parses the whole OpenAPI spec: loaded only when the page opens.
@@ -18,6 +22,9 @@ type Scope = APIKey["scope"];
 export function ApiPage() {
   return (
     <>
+      <Link to="/settings" search={{ tab: "security" }} className="mb-2 inline-flex items-center gap-1 rounded-lg text-[13px] font-medium text-[var(--ink-500)] hover:text-[var(--ink-900)]">
+        <ChevronLeft size={16} aria-hidden /> {t("apiPage.back")}
+      </Link>
       <PageHeader title={t("apiPage.title")} sub={t("apiPage.subtitle")} />
       <div className="flex flex-col gap-4">
         <KeysCard />
@@ -34,7 +41,7 @@ const expiries = [0, 30, 90, 365] as const;
 function KeysCard() {
   const qc = useQueryClient();
   const toast = useToast();
-  const keys = useQuery({ queryKey: qk.apiKeys, queryFn: () => unwrap(api.GET("/api/v1/api-keys")) });
+  const keys = useQuery({ queryKey: qk.apiKeys, queryFn: ({ signal }) => unwrap(api.GET("/api/v1/api-keys", { signal })) });
   const [adding, setAdding] = useState(false);
   const [made, setMade] = useState<string | null>(null);
   const [revoking, setRevoking] = useState<APIKey | null>(null);
@@ -58,19 +65,19 @@ function KeysCard() {
           <Plus size={16} aria-hidden /> {t("apiPage.newKey")}
         </Button>
       </div>
-      {keys.isPending ? (
-        <Skeleton style={{ height: 96 }} />
-      ) : keys.isError ? (
-        <ErrorState text={errorText(keys.error)} onRetry={() => void keys.refetch()} />
-      ) : keys.data.length === 0 ? (
-        <EmptyState title={t("apiPage.noKeys")} text={t("apiPage.noKeysText")} />
-      ) : (
-        <ul className="row-list">
-          {keys.data.map((k) => (
-            <KeyRow key={k.id} k={k} onRevoke={() => setRevoking(k)} />
-          ))}
-        </ul>
-      )}
+      <QueryBoundary query={keys} pending={<Skeleton style={{ height: 96 }} />}>
+        {(list) =>
+          list.length === 0 ? (
+            <EmptyState title={t("apiPage.noKeys")} text={t("apiPage.noKeysText")} />
+          ) : (
+            <ul className="row-list">
+              {list.map((k) => (
+                <KeyRow key={k.id} k={k} onRevoke={() => setRevoking(k)} />
+              ))}
+            </ul>
+          )
+        }
+      </QueryBoundary>
       <NewKeyDrawer open={adding} onOpenChange={setAdding} onMade={setMade} />
       <MadeKeyDrawer apiKey={made} onClose={() => setMade(null)} />
       <Confirm
@@ -123,18 +130,24 @@ function NewKeyDrawer({ open, onOpenChange, onMade }: { open: boolean; onOpenCha
   const [name, setName] = useState("");
   const [scope, setScope] = useState<Scope>("read");
   const [days, setDays] = useState<number>(0);
+  const [password, setPassword] = useState("");
+  const [code, setCode] = useState("");
+  const me = useQuery(meQuery);
+  const totp = !!me.data?.admin.totp_enabled;
   const create = useMutation({
-    mutationFn: () => unwrap(api.POST("/api/v1/api-keys", { body: { name: name.trim(), scope, expire_days: days } })),
+    mutationFn: () => unwrap(api.POST("/api/v1/api-keys", { body: { name: name.trim(), scope, expire_days: days, password, totp: code || undefined } })),
     onSuccess: (r) => {
       void qc.invalidateQueries({ queryKey: qk.apiKeys });
       onOpenChange(false);
       setName("");
       setScope("read");
       setDays(0);
+      setPassword("");
+      setCode("");
       onMade(r.key);
     },
   });
-  const errors = create.error instanceof ApiError ? create.error.fields : {};
+  const errors = fieldErrors(create.error);
   const submit = (e: FormEvent) => {
     e.preventDefault();
     create.mutate();
@@ -152,7 +165,7 @@ function NewKeyDrawer({ open, onOpenChange, onMade }: { open: boolean; onOpenCha
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
             {t("common.cancel")}
           </Button>
-          <Button variant="primary" type="submit" form="new-key" loading={create.isPending} disabled={!name.trim()}>
+          <Button variant="primary" type="submit" form="new-key" loading={create.isPending} disabled={!name.trim() || !password || (totp && code.length !== 6)}>
             {t("apiPage.create")}
           </Button>
         </>
@@ -183,6 +196,14 @@ function NewKeyDrawer({ open, onOpenChange, onMade }: { open: boolean; onOpenCha
             ))}
           </select>
         </Field>
+        <Field label={t("apiPage.password")} htmlFor="k-pw" hint={t("apiPage.passwordHint")} error={errors.password}>
+          <input id="k-pw" type="password" className="input" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" aria-invalid={!!errors.password} />
+        </Field>
+        {totp ? (
+          <Field label={t("settings.totpCode")} htmlFor="k-totp" error={errors.totp}>
+            <input id="k-totp" className="input mono max-w-[160px] tracking-[0.2em]" inputMode="numeric" maxLength={6} value={code} onChange={(e) => setCode(e.target.value.trim())} autoComplete="one-time-code" aria-invalid={!!errors.totp} />
+          </Field>
+        ) : null}
       </form>
     </Drawer>
   );
@@ -190,16 +211,8 @@ function NewKeyDrawer({ open, onOpenChange, onMade }: { open: boolean; onOpenCha
 
 /** The key is shown once: the panel keeps only its hash. */
 function MadeKeyDrawer({ apiKey, onClose }: { apiKey: string | null; onClose: () => void }) {
-  const toast = useToast();
-  const copy = async () => {
-    if (!apiKey) return;
-    try {
-      await navigator.clipboard.writeText(apiKey);
-      toast.ok(t("apiPage.keyCopied"));
-    } catch {
-      toast.error(t("common.copyFailed"));
-    }
-  };
+  const copyText = useCopy();
+  const copy = () => apiKey && copyText(apiKey, t("apiPage.keyCopied"));
   return (
     <Drawer
       open={!!apiKey}

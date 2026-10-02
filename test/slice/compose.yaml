@@ -10,6 +10,10 @@ services:
       # the test target lives on a private docker network
       MIKAN_ALLOW_PRIVATE: "true"
     volumes: ["data:/data", "run:/run/mikan"]
+    # The panel takes a public host only as an IP or a full domain name.
+    networks:
+      default:
+        aliases: [node.test]
 
   panel:
     image: mikan:slice

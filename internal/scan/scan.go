@@ -13,11 +13,14 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"slices"
 	"sort"
-
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"mikan/internal/proto"
 )
 
 type Result struct {
@@ -40,8 +43,37 @@ const (
 	handshakeTimeout = 5 * time.Second
 )
 
-// Check tests dest as a REALITY target for clients sending sni ("" = the host of dest).
-func Check(ctx context.Context, dest, sni string) Result {
+// Options say where a check may connect. The server dials what the admin names, so a
+// name that leads to this host or its network (127.0.0.1.nip.io, a rebinding name) must
+// not be dialed, whatever its text looks like.
+type Options struct {
+	// LoopbackPort allows 127.0.0.1:<port> alone: the panel's own HTTPS (self-steal).
+	LoopbackPort int
+	// Any allows every address: tests and test setups.
+	Any bool
+	// Resolve looks a name up; nil asks the system's resolver for IPv4.
+	Resolve func(ctx context.Context, host string) ([]netip.Addr, error)
+}
+
+func (o Options) lookup(ctx context.Context, host string) ([]netip.Addr, error) {
+	if o.Resolve != nil {
+		return o.Resolve(ctx, host)
+	}
+	return net.DefaultResolver.LookupNetIP(ctx, "ip4", host)
+}
+
+// allowed: may the check connect to ip on port?
+func (o Options) allowed(ip netip.Addr, port string) bool {
+	if o.Any || proto.PublicAddr(ip) {
+		return true
+	}
+	return o.LoopbackPort > 0 && ip == netip.MustParseAddr("127.0.0.1") && port == strconv.Itoa(o.LoopbackPort)
+}
+
+// Check tests dest as a REALITY target for clients sending sni ("" = the host of dest). It
+// connects only to addresses o allows, and to the very address it checked: the name is
+// resolved once.
+func Check(ctx context.Context, dest, sni string, o Options) Result {
 	r := Result{Dest: dest, SNI: sni}
 	host, port, err := net.SplitHostPort(dest)
 	if err != nil {
@@ -55,17 +87,31 @@ func Check(ctx context.Context, dest, sni string) Result {
 		}
 		r.SNI = host
 	}
-	ip := host
-	if _, err := netip.ParseAddr(host); err != nil {
-		addrs, err := net.DefaultResolver.LookupNetIP(ctx, "ip4", host)
+	var ip netip.Addr
+	if a, err := netip.ParseAddr(host); err == nil {
+		ip = a
+	} else {
+		addrs, err := o.lookup(ctx, host)
 		if err != nil || len(addrs) == 0 {
 			r.Error = "dns"
 			return r
 		}
-		ip = addrs[0].String()
+		// The first address the check may use: a name with a private address among its
+		// answers is still dialed on a public one, never on the private one.
+		// A name never leads to loopback, not even to the panel's own port: that is for the literal address.
+		i := slices.IndexFunc(addrs, func(a netip.Addr) bool { return o.Any || proto.PublicAddr(a) })
+		if i < 0 {
+			r.Error = "private"
+			return r
+		}
+		ip = addrs[i]
 	}
-	r.IP = ip
-	addr := net.JoinHostPort(ip, port)
+	if !o.allowed(ip, port) {
+		r.Error = "private"
+		return r
+	}
+	r.IP = ip.String()
+	addr := net.JoinHostPort(ip.String(), port)
 
 	// First with X25519 only: REALITY clients offer it, a target without it breaks them.
 	cs, rtt, err := handshake(ctx, addr, r.SNI, []tls.CurveID{tls.X25519})
@@ -88,7 +134,7 @@ func Check(ctx context.Context, dest, sni string) Result {
 		_, verr := leaf.Verify(x509.VerifyOptions{DNSName: r.SNI, Intermediates: pool})
 		r.CertValid = verr == nil
 	}
-	r.DNSMatch = resolvesTo(ctx, r.SNI, ip)
+	r.DNSMatch = resolvesTo(ctx, r.SNI, r.IP, o)
 	r.OK = r.TLS13 && r.H2 && r.X25519 && r.CertValid
 	return r
 }
@@ -112,11 +158,11 @@ func handshake(ctx context.Context, addr, sni string, curves []tls.CurveID) (tls
 	return t.ConnectionState(), rtt, nil
 }
 
-func resolvesTo(ctx context.Context, name, ip string) bool {
+func resolvesTo(ctx context.Context, name, ip string, o Options) bool {
 	if _, err := netip.ParseAddr(name); err == nil {
 		return name == ip
 	}
-	addrs, err := net.DefaultResolver.LookupNetIP(ctx, "ip4", name)
+	addrs, err := o.lookup(ctx, name)
 	if err != nil {
 		return false
 	}
@@ -142,10 +188,14 @@ func classify(err error) string {
 }
 
 // Neighbors scans the /24 around ip for usable targets and returns the best ones by RTT.
-func Neighbors(ctx context.Context, ip string, limit int) (found []Result, scanned int, err error) {
+func Neighbors(ctx context.Context, ip string, limit int, o Options) (found []Result, scanned int, err error) {
 	self, err := netip.ParseAddr(ip)
 	if err != nil || !self.Is4() {
 		return nil, 0, errors.New("need an IPv4 address")
+	}
+	// It connects to a /24 around ip: never the neighborhood of this host's own network.
+	if !o.Any && !proto.PublicAddr(self) {
+		return nil, 0, errors.New("need a public IPv4 address")
 	}
 	prefix, _ := self.Prefix(24)
 	var (
@@ -173,7 +223,7 @@ func Neighbors(ctx context.Context, ip string, limit int) (found []Result, scann
 			if name == "" {
 				return
 			}
-			r := Check(ctx, net.JoinHostPort(a.String(), "443"), name)
+			r := Check(ctx, net.JoinHostPort(a.String(), "443"), name, Options{Any: o.Any})
 			// Shared VPS networks are full of other people's REALITY servers: probed without
 			// a valid client they relay www.samsung.com or yahoo.com. Such a name does not
 			// resolve to that address; a real neighbor site does.

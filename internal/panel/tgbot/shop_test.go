@@ -10,6 +10,7 @@ import (
 
 	"mikan/internal/panel/billing"
 	"mikan/internal/panel/domain"
+	"mikan/internal/panel/settings"
 	"mikan/internal/panel/store/db"
 )
 
@@ -35,9 +36,20 @@ func TestShopStars(t *testing.T) {
 	svc.SetTelegram(e.bot)
 	const buyer = 777
 
+	// Selling is off on a panel that never turned it on: the welcome has no shop.
 	n := e.tg.count()
 	e.say(buyer, "/start")
 	send, _ := find(e.tg.wait(t, n, "sendMessage"), "sendMessage")
+	if _, ok := buttons(send)["🛒 Купить подписку"]; ok {
+		t.Fatalf("shop with selling off: %v", buttons(send))
+	}
+	if err := settings.Set(e.ctx, e.set, billing.KeyConfig, billing.Config{Enabled: true, Stars: true, AllowNew: true, RenewResetsTraffic: true}); err != nil {
+		t.Fatal(err)
+	}
+	e.later()
+	n = e.tg.count()
+	e.say(buyer, "/start")
+	send, _ = find(e.tg.wait(t, n, "sendMessage"), "sendMessage")
 	if buttons(send)["🛒 Купить подписку"] != "b" {
 		t.Fatalf("welcome without the shop: %v", buttons(send))
 	}

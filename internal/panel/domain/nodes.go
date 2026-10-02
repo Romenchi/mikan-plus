@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"mikan/internal/hostname"
 	"mikan/internal/nodetls"
 	"mikan/internal/panel/presets"
 	"mikan/internal/panel/store"
@@ -23,6 +24,7 @@ var (
 	ErrUnknownNode = errors.New("unknown_node")
 	ErrLocalNode   = errors.New("local_node")
 	ErrBadHost     = errors.New("bad_host")
+	ErrBadDomain   = errors.New("bad_domain")
 )
 
 // NodeInput describes a remote node the panel is going to drive.
@@ -36,9 +38,12 @@ type NodeInput struct {
 // AddNode creates a remote node with the default inbounds and returns its join key.
 // The key carries the node's private key: it is shown once and never stored.
 func AddNode(ctx context.Context, st *store.Store, panel nodetls.Pair, in NodeInput, now time.Time) (db.Node, string, error) {
-	host := strings.TrimSpace(in.Host)
-	if host == "" || strings.ContainsAny(host, "/: ") && net.ParseIP(host) == nil {
+	host, dom := strings.TrimSpace(in.Host), strings.TrimSpace(in.Domain)
+	if !hostname.Valid(host) {
 		return db.Node{}, "", ErrBadHost
+	}
+	if dom != "" && !hostname.Valid(dom) {
+		return db.Node{}, "", ErrBadDomain
 	}
 	port := in.APIPort
 	if port == 0 {
@@ -56,7 +61,7 @@ func AddNode(ctx context.Context, st *store.Store, panel nodetls.Pair, in NodeIn
 	err := st.Tx(ctx, func(q *db.Queries) error {
 		var err error
 		node, err = q.CreateNode(ctx, db.CreateNodeParams{Name: strings.TrimSpace(in.Name), Address: net.JoinHostPort(host, strconv.Itoa(port)),
-			PublicHost: host, Domain: strings.TrimSpace(in.Domain), CreatedAt: now.Unix(), UpdatedAt: now.Unix()})
+			PublicHost: host, Domain: dom, CreatedAt: now.Unix(), UpdatedAt: now.Unix()})
 		if err != nil {
 			return err
 		}

@@ -1,5 +1,5 @@
 -- +goose Up
-CREATE TABLE node_relay (
+CREATE TABLE IF NOT EXISTS node_relay (
   node_id     INTEGER PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
   enabled     INTEGER NOT NULL DEFAULT 0,
   protocol    TEXT NOT NULL DEFAULT 'vless',

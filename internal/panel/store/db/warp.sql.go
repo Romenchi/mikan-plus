@@ -9,13 +9,16 @@ import (
 	"context"
 )
 
-const deleteNodeWarp = `-- name: DeleteNodeWarp :exec
+const deleteNodeWarp = `-- name: DeleteNodeWarp :execrows
 DELETE FROM node_warp WHERE node_id = ?
 `
 
-func (q *Queries) DeleteNodeWarp(ctx context.Context, nodeID int64) error {
-	_, err := q.db.ExecContext(ctx, deleteNodeWarp, nodeID)
-	return err
+func (q *Queries) DeleteNodeWarp(ctx context.Context, nodeID int64) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteNodeWarp, nodeID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const getNodeWarp = `-- name: GetNodeWarp :one

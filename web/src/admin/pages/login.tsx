@@ -9,6 +9,7 @@ import { Logo } from "../../components/atmosphere";
 import { LangSwitch } from "../../components/lang";
 import { Button, Field } from "../../components/ui";
 import { t } from "../../i18n";
+import { localPath } from "../../lib/url";
 
 export function LoginPage() {
   const { next } = useSearch({ from: "/login" });
@@ -37,7 +38,8 @@ export function LoginPage() {
     onSuccess: (me) => {
       setCsrf(me.csrf_token);
       qc.setQueryData(qk.me, me);
-      const target = next && next.startsWith("/") && !next.startsWith("/login") ? next : "/";
+      // Only a path of this panel: a link made to send the admin elsewhere after signing in goes to the overview.
+      const target = localPath(next);
       void navigate({ to: target });
     },
     onError: (e) => {

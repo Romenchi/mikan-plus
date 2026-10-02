@@ -61,7 +61,6 @@ type Device struct {
 	Ip        string
 	FirstSeen int64
 	LastSeen  int64
-	Client    string
 }
 
 type Inbound struct {
@@ -79,6 +78,9 @@ type Inbound struct {
 	AutoPort    int64
 	AutoSni     int64
 	Outbound    string
+	ExitNodeID  sql.NullInt64
+	PoolID      sql.NullInt64
+	Listen      string
 }
 
 type InboundEvent struct {
@@ -111,6 +113,15 @@ type Node struct {
 	UpdatedAt  int64
 }
 
+type NodeRelay struct {
+	NodeID     int64
+	Port       string
+	Config     string
+	Outbound   string
+	ExitNodeID sql.NullInt64
+	CreatedAt  int64
+}
+
 type NodeState struct {
 	Key   string
 	Value string
@@ -135,7 +146,7 @@ type NodeWarp struct {
 	UpdatedAt     int64
 }
 
-type NodeRelay struct {
+type NodeUpstreamRelay struct {
 	NodeID      int64
 	Enabled     int64
 	Protocol    string
@@ -162,7 +173,8 @@ type Payment struct {
 	TgID       int64
 	Kind       string
 	UserID     sql.NullInt64
-	TariffID   int64
+	TariffID   sql.NullInt64
+	PackageID  sql.NullInt64
 	TariffName string
 	Amount     int64
 	Currency   string
@@ -173,6 +185,12 @@ type Payment struct {
 	PaidAt     sql.NullInt64
 	AppliedAt  sql.NullInt64
 	RefundedAt sql.NullInt64
+}
+
+type RelayUser struct {
+	ExitNodeID int64
+	SrcNodeID  int64
+	Uuid       string
 }
 
 type Session struct {
@@ -201,6 +219,11 @@ type Slot struct {
 	BurnedAt  sql.NullInt64
 }
 
+type SlotCounter struct {
+	ID   int64
+	Last int64
+}
+
 type SubFetch struct {
 	UserID    int64
 	Ip        string
@@ -222,6 +245,12 @@ type Tariff struct {
 	PriceStars    sql.NullInt64
 	PriceRub      sql.NullInt64
 	OnSale        int64
+}
+
+type TariffPool struct {
+	TariffID     int64
+	PoolID       int64
+	TrafficLimit int64
 }
 
 type TgChat struct {
@@ -255,11 +284,47 @@ type TrafficDaily struct {
 	Down   int64
 }
 
+type TrafficGrant struct {
+	ID        int64
+	UserID    int64
+	PoolID    sql.NullInt64
+	Bytes     int64
+	Remaining int64
+	Lifetime  string
+	ExpiresAt sql.NullInt64
+	Source    string
+	PaymentID sql.NullInt64
+	PackageID sql.NullInt64
+	Note      string
+	CreatedAt int64
+}
+
 type TrafficHourly struct {
 	UserID int64
 	Hour   int64
 	Up     int64
 	Down   int64
+}
+
+type TrafficPackage struct {
+	ID         int64
+	Name       string
+	Bytes      int64
+	PoolID     sql.NullInt64
+	Lifetime   string
+	Days       int64
+	PriceStars sql.NullInt64
+	PriceRub   sql.NullInt64
+	OnSale     int64
+	Sort       int64
+	Archived   int64
+	CreatedAt  int64
+}
+
+type TrafficPool struct {
+	ID        int64
+	Name      string
+	CreatedAt int64
 }
 
 type User struct {
@@ -288,4 +353,12 @@ type User struct {
 	UpdatedAt     int64
 	BillingDay    sql.NullInt64
 	UnboundAt     int64
+}
+
+type UserPool struct {
+	UserID       int64
+	PoolID       int64
+	TrafficLimit sql.NullInt64
+	UsedUp       int64
+	UsedDown     int64
 }

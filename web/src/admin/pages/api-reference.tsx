@@ -1,12 +1,13 @@
 // The API reference: rendered from the OpenAPI spec the server exports at build time
 // (`mikan openapi`), so it always matches the panel it ships with.
-import { Copy, Play, Search } from "lucide-react";
+import { Copy, Download, Play, Search } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import { basePath } from "../../api/client";
+import { useUpdates } from "../../api/hooks";
 import rawSpec from "../../api/openapi.json";
-import { useToast } from "../../components/toast";
 import { Button, EmptyState } from "../../components/ui";
 import { t, tMaybe } from "../../i18n";
+import { useCopy } from "../../lib/copy";
 
 type Schema = {
   $ref?: string;
@@ -116,8 +117,21 @@ export default function ApiReference() {
   );
 }
 
+// download saves the spec as openapi.json with this panel as its server, so Postman and
+// client generators work with it as is. The address has the secret admin path in it.
+function download(version: string | undefined) {
+  const doc = { ...rawSpec, info: { ...rawSpec.info, version: version ?? rawSpec.info.version }, servers: [{ url: apiBase() }] };
+  const url = URL.createObjectURL(new Blob([JSON.stringify(doc, null, 2)], { type: "application/json" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "mikan-openapi.json";
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 function Intro() {
   const base = `${apiBase()}/api/v1`;
+  const updates = useUpdates();
   return (
     <section className="card glass reveal" style={{ "--i": 1 } as React.CSSProperties}>
       <div className="card-head">
@@ -125,6 +139,9 @@ function Intro() {
           <h2 className="card-title">{t("apiPage.start")}</h2>
           <div className="card-sub">{t("apiPage.startSub")}</div>
         </div>
+        <Button size="sm" onClick={() => download(updates.data?.current)}>
+          <Download size={16} aria-hidden /> {t("apiPage.download")}
+        </Button>
       </div>
       <div className="api-h">{t("apiPage.baseUrl")}</div>
       <CodeBlock code={base} label={t("apiPage.copyBase")} />
@@ -137,24 +154,17 @@ function Intro() {
       </ul>
       <div className="api-h">{t("apiPage.example")}</div>
       <CodeBlock code={`curl -s -H "Authorization: Bearer $MIKAN_KEY" \\\n  "${base}/users?state=active&limit=10"`} label={t("apiPage.copyExample")} />
+      <p className="mt-3 text-xs text-[var(--ink-500)]">{t("apiPage.downloadHint")}</p>
     </section>
   );
 }
 
 function CodeBlock({ code, label }: { code: string; label: string }) {
-  const toast = useToast();
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(code);
-      toast.ok(t("apiPage.copied"));
-    } catch {
-      toast.error(t("common.copyFailed"));
-    }
-  };
+  const copy = useCopy();
   return (
     <div className="code-block">
       {code}
-      <button type="button" className="icon-btn" onClick={() => void copy()} aria-label={label}>
+      <button type="button" className="icon-btn" onClick={() => void copy(code, t("apiPage.copied"))} aria-label={label}>
         <Copy size={16} />
       </button>
     </div>

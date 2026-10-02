@@ -36,21 +36,23 @@ func TestState(t *testing.T) {
 	at := func(d time.Duration) sql.NullInt64 { return sql.NullInt64{Int64: now.Add(d).Unix(), Valid: true} }
 	limit := sql.NullInt64{Int64: 100, Valid: true}
 	cases := []struct {
-		name string
-		u    db.User
-		want string
+		name   string
+		u      db.User
+		grants int64
+		want   string
 	}{
-		{"no limits", db.User{Status: "active"}, StateActive},
-		{"disabled wins", db.User{Status: "disabled", ExpiresAt: at(-time.Hour)}, StateDisabled},
-		{"expired", db.User{Status: "active", ExpiresAt: at(-time.Second)}, StateExpired},
-		{"expires exactly now", db.User{Status: "active", ExpiresAt: at(0)}, StateExpired},
-		{"over quota", db.User{Status: "active", TrafficLimit: limit, UsedUp: 40, UsedDown: 60}, StateLimited},
-		{"under quota", db.User{Status: "active", TrafficLimit: limit, UsedDown: 99}, StateActive},
-		{"expiring in 7d", db.User{Status: "active", ExpiresAt: at(7 * 24 * time.Hour)}, StateExpiring},
-		{"8 days left", db.User{Status: "active", ExpiresAt: at(8 * 24 * time.Hour)}, StateActive},
+		{"no limits", db.User{Status: "active"}, 0, StateActive},
+		{"disabled wins", db.User{Status: "disabled", ExpiresAt: at(-time.Hour)}, 0, StateDisabled},
+		{"expired", db.User{Status: "active", ExpiresAt: at(-time.Second)}, 0, StateExpired},
+		{"expires exactly now", db.User{Status: "active", ExpiresAt: at(0)}, 0, StateExpired},
+		{"over quota", db.User{Status: "active", TrafficLimit: limit, UsedUp: 40, UsedDown: 60}, 0, StateLimited},
+		{"over quota with grants left", db.User{Status: "active", TrafficLimit: limit, UsedUp: 40, UsedDown: 70}, 1, StateActive},
+		{"under quota", db.User{Status: "active", TrafficLimit: limit, UsedDown: 99}, 0, StateActive},
+		{"expiring in 7d", db.User{Status: "active", ExpiresAt: at(7 * 24 * time.Hour)}, 0, StateExpiring},
+		{"8 days left", db.User{Status: "active", ExpiresAt: at(8 * 24 * time.Hour)}, 0, StateActive},
 	}
 	for _, c := range cases {
-		if got := State(c.u, now); got != c.want {
+		if got := State(c.u, c.grants, now); got != c.want {
 			t.Errorf("%s: got %s, want %s", c.name, got, c.want)
 		}
 	}

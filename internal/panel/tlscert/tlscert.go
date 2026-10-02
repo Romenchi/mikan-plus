@@ -16,9 +16,11 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"slices"
+	"sync"
 	"sync/atomic"
 	"time"
+
+	"mikan/internal/fsutil"
 )
 
 // Holder lets the certificate be swapped (ACME renewal, host change) without a restart.
@@ -36,11 +38,18 @@ func (h *Holder) Get(*tls.ClientHelloInfo) (*tls.Certificate, error) {
 	return c, nil
 }
 
+// selfMu keeps the pair dir/self.{crt,key} whole: a certificate is made and written, or
+// read, by one caller at a time, so concurrent callers (a subscription, a node's sync)
+// never generate two pairs or read one half of each.
+var selfMu sync.Mutex
+
 // LoadOrCreateSelfSigned reuses dir/self.{crt,key} when it covers host and is not
 // about to expire, otherwise writes a fresh ECDSA P-256 certificate.
 func LoadOrCreateSelfSigned(dir, host string, now time.Time) (*tls.Certificate, error) {
+	selfMu.Lock()
+	defer selfMu.Unlock()
 	certPath, keyPath := filepath.Join(dir, "self.crt"), filepath.Join(dir, "self.key")
-	if c, err := tls.LoadX509KeyPair(certPath, keyPath); err == nil && c.Leaf != nil && covers(c.Leaf, host) && now.Add(30*24*time.Hour).Before(c.Leaf.NotAfter) {
+	if c, err := tls.LoadX509KeyPair(certPath, keyPath); err == nil && c.Leaf != nil && Covers(c.Leaf, host) && now.Add(30*24*time.Hour).Before(c.Leaf.NotAfter) {
 		return &c, nil
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -76,10 +85,10 @@ func LoadOrCreateSelfSigned(dir, host string, now time.Time) (*tls.Certificate, 
 	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+	if err := fsutil.WriteFileAtomic(keyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+	if err := fsutil.WriteFileAtomic(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
 		return nil, err
 	}
 	c, err := tls.LoadX509KeyPair(certPath, keyPath)
@@ -92,6 +101,8 @@ func LoadOrCreateSelfSigned(dir, host string, now time.Time) (*tls.Certificate, 
 // PEM returns the certificate and key files as text plus the hex SHA-256 of the leaf,
 // which clients pin when the certificate is self-signed.
 func PEM(dir string) (certPEM, keyPEM, pin string, err error) {
+	selfMu.Lock()
+	defer selfMu.Unlock()
 	c, err := os.ReadFile(filepath.Join(dir, "self.crt"))
 	if err != nil {
 		return "", "", "", err
@@ -106,11 +117,4 @@ func PEM(dir string) (certPEM, keyPEM, pin string, err error) {
 	}
 	sum := sha256.Sum256(block.Bytes)
 	return string(c), string(k), hex.EncodeToString(sum[:]), nil
-}
-
-func covers(leaf *x509.Certificate, host string) bool {
-	if ip := net.ParseIP(host); ip != nil {
-		return slices.ContainsFunc(leaf.IPAddresses, ip.Equal)
-	}
-	return slices.Contains(leaf.DNSNames, host)
 }

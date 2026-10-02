@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"mikan/internal/nodeapi"
@@ -53,6 +54,9 @@ type Manager struct {
 	mu        sync.Mutex
 	running   map[int64]*running
 	lastPurge time.Time
+	lastPrune time.Time
+
+	generation atomic.Uint64 // moves whenever a node is added, changed or removed
 }
 
 type running struct {
@@ -98,7 +102,14 @@ func (m *Manager) SlotsChanged() {
 }
 
 // NodesChanged restarts syncers after a node was added, removed or re-keyed.
-func (m *Manager) NodesChanged() { signal(m.nodesDirty) }
+func (m *Manager) NodesChanged() {
+	m.generation.Add(1)
+	signal(m.nodesDirty)
+}
+
+// Generation moves with every NodesChanged: what is built from the nodes (the subscription's
+// server list) is built again when it has moved.
+func (m *Manager) Generation() uint64 { return m.generation.Load() }
 
 // Syncers returns the running syncers ordered by node id.
 func (m *Manager) Syncers() []*Syncer {
@@ -340,21 +351,42 @@ func (m *Manager) maintain(ctx context.Context) {
 		m.log.Error("period resets", "err", err)
 	}
 	m.maintainPool(ctx, now)
-	if err := m.st.Q.PruneTrafficHourly(ctx, now.Add(-62*24*time.Hour).Unix()/3600); err != nil {
-		m.log.Error("prune traffic", "err", err)
-	}
+	m.prune(ctx, now)
 	if err := m.recordDevices(ctx, now); err != nil {
 		m.log.Error("record devices", "err", err)
 	}
 	m.reconcile(ctx)
 	for _, s := range m.Syncers() {
 		// Reconcile: picks up changes made outside the API (server CLI, restore) and pushes
-		// policies, whose key changes by time alone when a user crosses expires_at.
+		// policies, whose key changes by time alone when a user crosses expires_at, and which
+		// are sent again when they are old: a user's quota and devices span nodes and bound
+		// devices (a slot each), while each node counts per slot.
 		s.SlotsChanged()
-		// A user's quota and devices span nodes and bound devices (a slot each), while each
-		// node counts per slot: refresh the quota left and the devices seen elsewhere.
-		s.PoliciesChanged()
 	}
+}
+
+// How long traffic by the hour and the devices that went quiet are kept, and how often
+// the old rows are deleted: the tables are big, the delete scans them, and it holds the
+// database's one writer.
+const (
+	hourlyKeep = 62 * 24 * time.Hour
+	deviceKeep = 30 * 24 * time.Hour
+	pruneEvery = time.Hour
+)
+
+func (m *Manager) prune(ctx context.Context, now time.Time) {
+	if !m.lastPrune.IsZero() && now.Sub(m.lastPrune) < pruneEvery {
+		return
+	}
+	if err := m.st.Q.PruneTrafficHourly(ctx, now.Add(-hourlyKeep).Unix()/3600); err != nil {
+		m.log.Error("prune traffic", "err", err)
+		return
+	}
+	if err := m.st.Q.PruneDevices(ctx, now.Add(-deviceKeep).Unix()); err != nil {
+		m.log.Error("prune devices", "err", err)
+		return
+	}
+	m.lastPrune = now
 }
 
 func (m *Manager) resetPeriods(ctx context.Context, now time.Time) error {
@@ -382,7 +414,8 @@ func (m *Manager) resetPeriods(ctx context.Context, now time.Time) error {
 		default:
 			continue
 		}
-		if err := m.st.Q.ResetUserTraffic(ctx, db.ResetUserTrafficParams{PeriodStart: start, UpdatedAt: now.Unix(), ID: u.ID}); err != nil {
+		err := m.st.Tx(ctx, func(q *db.Queries) error { return domain.StartPeriod(ctx, q, u.ID, start, now) })
+		if err != nil {
 			return err
 		}
 		changed = true
@@ -399,7 +432,7 @@ func (m *Manager) maintainPool(ctx context.Context, now time.Time) {
 		m.log.Error("pool stats", "err", err)
 		return
 	}
-	quietHour, _, err := settings.Get[int](ctx, m.set, "quiet_hour_utc")
+	quietHour, _, err := settings.Get[int](ctx, m.set, settings.KeyQuietHour)
 	if err != nil {
 		m.log.Error("quiet hour", "err", err)
 	}
@@ -461,7 +494,7 @@ func (m *Manager) recordDevices(ctx context.Context, now time.Time) error {
 				}
 			}
 		}
-		return q.PruneDevices(ctx, now.Add(-30*24*time.Hour).Unix())
+		return nil
 	})
 }
 

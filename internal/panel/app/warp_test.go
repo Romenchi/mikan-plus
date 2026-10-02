@@ -103,8 +103,30 @@ func TestWarpOverHTTP(t *testing.T) {
 	if _, body := h.do(http.MethodGet, node, nil, nil); !strings.Contains(string(body), `"inbounds":["`+ins[0].Name+`"]`) {
 		t.Fatalf("warp inbounds: %s", body)
 	}
+	// WARP is not taken away from an inbound that goes out through it: it would leave
+	// directly, from the node's own address.
+	for name, do := range map[string]func() (*http.Response, []byte){
+		"delete": func() (*http.Response, []byte) { return h.do(http.MethodDelete, node, nil, csrf) },
+		"disable": func() (*http.Response, []byte) {
+			return h.do(http.MethodPatch, node, map[string]any{"enabled": false}, csrf)
+		},
+	} {
+		resp, body := do()
+		if resp.StatusCode != http.StatusConflict || !strings.Contains(string(body), "warp_in_use") || !strings.Contains(string(body), ins[0].Name) {
+			t.Fatalf("%s while an inbound uses WARP: %d %s", name, resp.StatusCode, body)
+		}
+	}
+	if _, body := h.do(http.MethodGet, node, nil, nil); !strings.Contains(string(body), `"configured":true`) || !strings.Contains(string(body), `"enabled":true`) {
+		t.Fatalf("a refused delete changed WARP: %s", body)
+	}
+	if resp, body := h.do(http.MethodPatch, api+"/inbounds/"+id, map[string]any{"outbound": "direct"}, csrf); resp.StatusCode != http.StatusOK {
+		t.Fatalf("back to direct: %d %s", resp.StatusCode, body)
+	}
 	if resp, _ := h.do(http.MethodDelete, node, nil, csrf); resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("delete: %d", resp.StatusCode)
+	}
+	if resp, _ := h.do(http.MethodDelete, node, nil, csrf); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("delete of nothing: %d", resp.StatusCode)
 	}
 	if _, body := h.do(http.MethodGet, node, nil, nil); !strings.Contains(string(body), `"configured":false`) {
 		t.Fatalf("after delete: %s", body)

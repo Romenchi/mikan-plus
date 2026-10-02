@@ -2,9 +2,12 @@ package tgbot
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
+	"mikan/internal/panel/domain"
 	"mikan/internal/panel/store/db"
 )
 
@@ -15,8 +18,9 @@ type notice struct {
 	text   string
 }
 
-// due are the notices a subscription has earned now.
-func due(u db.User, now time.Time, n Notify) []notice {
+// due are the notices a subscription has earned now; grants is what is left of its main
+// traffic packages: traffic runs out only when they do too.
+func due(u db.User, grants int64, now time.Time, n Notify) []notice {
 	if u.Status == "disabled" {
 		return nil
 	}
@@ -36,13 +40,94 @@ func due(u db.User, now time.Time, n Notify) []notice {
 	if u.TrafficLimit.Valid && u.TrafficLimit.Int64 > 0 {
 		used := u.UsedUp + u.UsedDown
 		switch {
-		case used >= u.TrafficLimit.Int64 && n.Traffic100:
+		case domain.TrafficLeft(u.TrafficLimit, used, grants) == 0 && n.Traffic100:
 			out = append(out, notice{kind: "traffic_100", period: u.PeriodStart})
-		case used*10 >= u.TrafficLimit.Int64*9 && n.Traffic90:
+		case grants <= 0 && used*10 >= u.TrafficLimit.Int64*9 && n.Traffic90:
 			out = append(out, notice{kind: "traffic_90", period: u.PeriodStart})
 		}
 	}
 	return out
+}
+
+// What a notice has been through in this process. tg_notices holds only the notices that
+// were delivered, so a notice that was not (Telegram unreachable, the outbox stopped by a
+// reload or a restart) is still due at the next round and goes again; this keeps one that
+// is on its way, or has just failed, from being queued twice meanwhile.
+type noticeState struct {
+	queued  bool      // in the outbox
+	retryAt time.Time // delivery failed: not again before this
+	sent    bool      // delivered, but the row could not be written
+}
+
+// noticeRetry is how long a notice waits after a failed delivery.
+const noticeRetry = 5 * time.Minute
+
+func noticeKey(userID int64, n notice) string {
+	return fmt.Sprintf("%d/%s/%d", userID, n.kind, n.period)
+}
+
+// claimNotice says whether n goes out now: not delivered before, not on its way, not
+// waiting out a failure.
+func (b *Bot) claimNotice(ctx context.Context, userID int64, n notice, now time.Time) (string, bool) {
+	key := noticeKey(userID, n)
+	b.noticeMu.Lock()
+	defer b.noticeMu.Unlock()
+	if st := b.notices[key]; st != nil && (st.queued || st.sent || now.Before(st.retryAt)) {
+		return "", false
+	}
+	var one int
+	err := b.d.Store.DB.QueryRowContext(ctx, `SELECT 1 FROM tg_notices WHERE user_id = ? AND kind = ? AND period = ?`, userID, n.kind, n.period).Scan(&one)
+	switch {
+	case err == nil:
+		return "", false // delivered
+	case !errors.Is(err, sql.ErrNoRows):
+		b.d.Log.Error("telegram: notices", "err", err)
+		return "", false
+	}
+	b.notices[key] = &noticeState{queued: true}
+	return key, true
+}
+
+// noticeDone is the outbox's word on a notice. Delivered, or refused for good (the user
+// blocked the bot, the chat is gone: sending again changes nothing), it is recorded and
+// never comes again. Anything else leaves it due for the next round.
+func (b *Bot) noticeDone(userID int64, n notice, key string, err error) {
+	var ae *APIError
+	// A refusal below 500 is Telegram's final word; a failure on its side is not.
+	delivered := err == nil || errors.As(err, &ae) && ae.Code < 500
+	b.noticeMu.Lock()
+	defer b.noticeMu.Unlock()
+	st := b.notices[key]
+	if st == nil {
+		return
+	}
+	if !delivered {
+		if errors.Is(err, context.Canceled) {
+			delete(b.notices, key) // the bot was stopped: the next round after it starts sends it
+			return
+		}
+		st.queued, st.retryAt = false, b.d.Now().Add(noticeRetry)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, werr := b.d.Store.Q.AddTgNotice(ctx, db.AddTgNoticeParams{UserID: userID, Kind: n.kind, Period: n.period, SentAt: b.d.Now().Unix()}); werr != nil {
+		b.d.Log.Error("telegram: notice sent, but not recorded", "err", werr)
+		st.queued, st.sent = false, true
+		return
+	}
+	delete(b.notices, key)
+}
+
+// forgetNotices drops what is no longer of use: failures that have waited long enough.
+func (b *Bot) forgetNotices(now time.Time) {
+	b.noticeMu.Lock()
+	defer b.noticeMu.Unlock()
+	for k, st := range b.notices {
+		if !st.queued && !st.sent && !now.Before(st.retryAt) {
+			delete(b.notices, k)
+		}
+	}
 }
 
 // night: automatic notices then come without a sound. Most users live on Moscow time;
@@ -52,8 +137,8 @@ func night(t time.Time) bool {
 	return h >= 22 || h < 9
 }
 
-// Notify queues the notices that are due, each once. The outbox paces them behind the
-// replies to people in their chats.
+// Notify queues the notices that are due, each until it is delivered, and not twice at
+// once. The outbox paces them behind the replies to people in their chats.
 func (b *Bot) Notify(ctx context.Context) {
 	out := b.out.Load()
 	if out == nil {
@@ -63,6 +148,7 @@ func (b *Bot) Notify(ctx context.Context) {
 	w := wordsFor(cfg.Lang)
 	now := b.d.Now()
 	silent := cfg.QuietNight && night(now)
+	b.forgetNotices(now)
 	links, err := b.d.Store.Q.ListTgLinks(ctx)
 	if err != nil {
 		b.d.Log.Error("telegram: notices", "err", err)
@@ -76,9 +162,13 @@ func (b *Bot) Notify(ctx context.Context) {
 		if err != nil {
 			continue
 		}
-		for _, n := range due(u, now, cfg.Notify) {
-			added, err := b.d.Store.Q.AddTgNotice(ctx, db.AddTgNoticeParams{UserID: u.ID, Kind: n.kind, Period: n.period, SentAt: now.Unix()})
-			if err != nil || added == 0 {
+		grants, err := domain.UserGrantsLeft(ctx, b.d.Store.Q, u.ID, now)
+		if err != nil {
+			continue
+		}
+		for _, n := range due(u, grants.Main(u.ID), now, cfg.Notify) {
+			key, ok := b.claimNotice(ctx, u.ID, n, now)
+			if !ok {
 				continue
 			}
 			vars := b.vars(ctx, w, u, now)
@@ -88,11 +178,11 @@ func (b *Bot) Notify(ctx context.Context) {
 			if n.kind != "traffic_90" {
 				kb = &Keyboard{[][]Button{{{Text: labelOf(cfg, "renew", "💳"), CallbackData: "r"}}}}
 			}
-			chat := l.TgID
+			chat, userID := l.TgID, u.ID
 			out.Notice(chat, func(ctx context.Context, c *Client) error {
 				_, err := c.Send(ctx, chat, text, kb, silent)
 				return err
-			}, nil)
+			}, func(err error) { b.noticeDone(userID, n, key, err) })
 		}
 	}
 	if now.Hour() == 3 && now.Minute() < 10 {
@@ -126,7 +216,7 @@ func (b *Bot) Broadcast(ctx context.Context, text string) (int, error) {
 	b.bcast = BroadcastProgress{Total: len(targets), Started: b.d.Now()}
 	b.mu.Unlock()
 	body := render(text, map[string]string{"brand": b.brand(ctx)})
-	for _, chat := range targets {
+	queue := func(chat int64) {
 		out.Bulk(chat, func(ctx context.Context, c *Client) error {
 			_, err := c.Send(ctx, chat, body, nil, false)
 			return err
@@ -140,7 +230,50 @@ func (b *Bot) Broadcast(ctx context.Context, text string) (int, error) {
 			b.mu.Unlock()
 		})
 	}
+	// The outbox sends 20 a second; queueing everyone at once would keep a message and a
+	// closure per account in memory for as long as that takes. A first batch goes in now,
+	// the rest as the lane drains.
+	first := min(len(targets), bulkBatch)
+	for _, chat := range targets[:first] {
+		queue(chat)
+	}
+	if rest := targets[first:]; len(rest) > 0 {
+		go b.feed(out, rest, queue)
+	}
 	return len(targets), nil
+}
+
+// bulkBatch is how many broadcast messages wait in the outbox; feed tops the lane up when
+// fewer than bulkLow are left.
+const (
+	bulkBatch = 500
+	bulkLow   = 100
+)
+
+// feed queues the rest of a broadcast in batches as the outbox sends. If the outbox stops
+// (the bot is reloaded or switched off) what is left is counted as failed, so the
+// progress ends.
+func (b *Bot) feed(out *Outbox, rest []int64, queue func(chat int64)) {
+	t := time.NewTicker(200 * time.Millisecond)
+	defer t.Stop()
+	for len(rest) > 0 {
+		select {
+		case <-out.Stopped():
+			b.mu.Lock()
+			b.bcast.Failed += len(rest)
+			b.mu.Unlock()
+			return
+		case <-t.C:
+		}
+		if out.pending(prioBulk) > bulkLow {
+			continue
+		}
+		n := min(len(rest), bulkBatch)
+		for _, chat := range rest[:n] {
+			queue(chat)
+		}
+		rest = rest[n:]
+	}
 }
 
 // Progress is the last broadcast.

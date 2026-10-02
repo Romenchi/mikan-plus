@@ -22,14 +22,27 @@ type Client struct {
 	base  string
 	token string
 	hc    *http.Client
+	// How long a call may take: a long poll holds its request for pollTimeout and gets
+	// this much on top, any other call only this much, an answer to a pre-checkout query
+	// preCheckoutTimeout, which Telegram's ten seconds leave it.
+	callTimeout time.Duration
 }
 
-func NewClient(base, token string) *Client {
+// callTimeout is a call's time, getUpdates apart. Telegram answers in a fraction of it;
+// past it the way there is down, and a call that hangs holds a worker of the outbox.
+const callTimeout = 15 * time.Second
+
+// preCheckoutTimeout: Telegram cancels the payment of a query not answered within ten
+// seconds, so the answer is not worth waiting for past eight.
+const preCheckoutTimeout = 8 * time.Second
+
+// NewClient: rt is the way to Telegram (see route.go); nil goes straight.
+func NewClient(base, token string, rt http.RoundTripper) *Client {
 	if base == "" {
 		base = DefaultAPI
 	}
-	// Long polling holds a request for up to pollTimeout; the client waits a bit longer.
-	return &Client{base: strings.TrimRight(base, "/"), token: token, hc: &http.Client{Timeout: pollTimeout + 15*time.Second}}
+	// No timeout on the client as a whole: each call sets its own (see call).
+	return &Client{base: strings.TrimRight(base, "/"), token: token, hc: &http.Client{Transport: rt}, callTimeout: callTimeout}
 }
 
 // APIError is Telegram's refusal. Code 403 means the user blocked the bot; 429 carries
@@ -45,11 +58,20 @@ func (e *APIError) Error() string { return fmt.Sprintf("telegram %d: %s", e.Code
 // ErrUnreachable: the Bot API did not answer.
 var ErrUnreachable = errors.New("telegram unreachable")
 
-func (c *Client) call(ctx context.Context, method string, in, out any) error {
+func (c *Client) call(parent context.Context, method string, in, out any) error {
 	body, err := json.Marshal(in)
 	if err != nil {
 		return err
 	}
+	timeout := c.callTimeout
+	switch method {
+	case "getUpdates":
+		timeout += pollTimeout
+	case "answerPreCheckoutQuery":
+		timeout = min(timeout, preCheckoutTimeout)
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/bot"+c.token+"/"+method, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -57,8 +79,8 @@ func (c *Client) call(ctx context.Context, method string, in, out any) error {
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
+		if parent.Err() != nil {
+			return parent.Err()
 		}
 		// The error text would carry the URL, and the URL the token.
 		return ErrUnreachable

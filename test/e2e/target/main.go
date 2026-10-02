@@ -4,6 +4,7 @@
 //	'D' n: server sends n bytes, closes        → client up 9, down n
 //	'U' n: client sends n bytes, server "K"    → client up 9+n, down 1
 //	'S' r: server streams r bytes/s until the client goes away
+//	'W' 0: server sends the address the connection came from, as text
 //
 // UDP on :9001 echoes every datagram.
 package main
@@ -43,6 +44,9 @@ func serve(c net.Conn) {
 		buf[i] = byte(i)
 	}
 	switch hdr[0] {
+	case 'W':
+		host, _, _ := net.SplitHostPort(c.RemoteAddr().String())
+		_, _ = c.Write([]byte(host))
 	case 'D':
 		for n > 0 {
 			k := min(n, int64(len(buf)))

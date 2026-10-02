@@ -24,8 +24,10 @@ pub fn latest_url() -> String {
     format!("https://github.com/{REPO}/releases/latest/download/manifest.json")
 }
 
+/// The manifest is signed, so the signature already says who wrote every byte; unknown
+/// fields are not refused, because a field a later release adds (a minimum version, a
+/// channel) must not stop every installer already out there from updating.
 #[derive(Deserialize, Debug, Clone)]
-#[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub version: String,
     pub published: String,
@@ -37,7 +39,6 @@ pub struct Manifest {
 }
 
 #[derive(Deserialize, Debug, Clone)]
-#[serde(deny_unknown_fields)]
 pub struct Asset {
     pub url: String,
     pub sha256: String,
@@ -63,25 +64,45 @@ pub fn latest() -> Result<Manifest> {
     parse(&data, &String::from_utf8_lossy(&sig), &key()?)
 }
 
-fn key() -> Result<VerifyingKey> {
+pub fn key() -> Result<VerifyingKey> {
     let raw: [u8; 32] = STANDARD.decode(PUBLIC_KEY)?.try_into().map_err(|_| anyhow::anyhow!("bad release key"))?;
     Ok(VerifyingKey::from_bytes(&raw)?)
 }
 
+/// Checks a signature of the release key over exact bytes (the manifest, the marketplace's
+/// catalog); what names the file goes into the errors.
+pub fn verify(data: &[u8], sig: &str, key: &VerifyingKey, what: &str) -> Result<()> {
+    let raw = STANDARD.decode(sig.trim()).with_context(|| format!("the {what}'s signature is not base64"))?;
+    let sig = Signature::from_slice(&raw).with_context(|| format!("the {what}'s signature is malformed"))?;
+    key.verify_strict(data, &sig).with_context(|| format!("the {what}'s signature does not match the release key"))
+}
+
 /// Checks the signature over the manifest's exact bytes, then what it says.
 pub fn parse(data: &[u8], sig: &str, key: &VerifyingKey) -> Result<Manifest> {
-    let raw = STANDARD.decode(sig.trim()).context("the manifest's signature is not base64")?;
-    let sig = Signature::from_slice(&raw).context("the manifest's signature is malformed")?;
-    key.verify_strict(data, &sig).context("the manifest's signature does not match the release key")?;
+    verify(data, sig, key, "manifest")?;
     let m: Manifest = serde_json::from_slice(data).context("the manifest is malformed")?;
     if semver(&m.version).is_none() {
         bail!("the manifest has a bad version {:?}", m.version);
     }
     let hex = m.digest.strip_prefix("sha256:").unwrap_or("");
-    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) || !m.image.starts_with("ghcr.io/") {
+    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) || !valid_image(&m.image) {
         bail!("the manifest names a bad image {}@{}", m.image, m.digest);
     }
+    for (arch, asset) in &m.installer {
+        let sha = asset.sha256.as_str();
+        if sha.len() != 64 || !sha.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) || !asset.url.starts_with("https://") {
+            bail!("the manifest has a bad installer for {arch}");
+        }
+    }
     Ok(m)
+}
+
+/// The release image lives in the project's own namespace on GitHub Packages; the value
+/// goes into .env and the compose file, so its characters are the image name's only.
+fn valid_image(image: &str) -> bool {
+    image.strip_prefix("ghcr.io/miroshka000/").is_some_and(|r| {
+        !r.is_empty() && !r.contains("..") && r.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._/-".contains(&b))
+    })
 }
 
 type Version<'a> = ([u64; 3], Option<&'a str>);
@@ -157,6 +178,46 @@ mod tests {
         assert!(parse(&docker_hub, &sig, &key).is_err());
     }
 
+    // A later release adds a field to the signed manifest (a minimum version, a channel):
+    // the installers already out there must still read it.
+    #[test]
+    fn new_fields_do_not_break_old_installers() {
+        let signer = SigningKey::from_bytes(&[7; 32]);
+        let key = signer.verifying_key();
+        let text = String::from_utf8(manifest("0.4.4", "ghcr.io/miroshka000/mikan")).unwrap();
+        let extended = text.replacen("{\"version\"", "{\"min_installer\":\"0.4.4\",\"channel\":\"stable\",\"version\"", 1).replacen(
+            "\"sha256\":",
+            "\"size\":123,\"sha256\":",
+            1,
+        );
+        assert_ne!(extended, text);
+        let sig = STANDARD.encode(signer.sign(extended.as_bytes()).to_bytes());
+        let m = parse(extended.as_bytes(), &sig, &key).expect("a manifest with new fields");
+        assert_eq!(m.version, "0.4.4");
+        assert!(m.installer.contains_key("x86_64"));
+    }
+
+    #[test]
+    fn only_the_projects_images_and_real_hashes() {
+        let signer = SigningKey::from_bytes(&[7; 32]);
+        let key = signer.verifying_key();
+        let accept = |data: &[u8]| parse(data, &STANDARD.encode(signer.sign(data).to_bytes()), &key).is_ok();
+        assert!(accept(&manifest("0.4.4", "ghcr.io/miroshka000/mikan")));
+        for bad in [
+            "ghcr.io/someone-else/mikan",
+            "ghcr.io/miroshka000/../x",
+            "ghcr.io/miroshka000/Mi kan",
+            "ghcr.io/miroshka000/",
+            "ghcr.io/miroshka000/m$x",
+        ] {
+            assert!(!accept(&manifest("0.4.4", bad)), "{bad}");
+        }
+        let short_hash = String::from_utf8(manifest("0.4.4", "ghcr.io/miroshka000/mikan")).unwrap().replace(&"b".repeat(64), "bb");
+        assert!(!accept(short_hash.as_bytes()));
+        let plain_http = String::from_utf8(manifest("0.4.4", "ghcr.io/miroshka000/mikan")).unwrap().replace("https://", "http://");
+        assert!(!accept(plain_http.as_bytes()));
+    }
+
     // The installer and the panel trust the same key.
     #[test]
     fn key_matches_the_panel() {
@@ -168,6 +229,26 @@ mod tests {
             "internal/release.JoinCommand differs"
         );
         key().unwrap();
+    }
+
+    // install.sh checks the manifest's signature with this very key before it runs anything
+    // it downloaded: its PEM must be the release key, and the script must still parse.
+    #[test]
+    fn install_sh_carries_the_release_key() {
+        let sh = include_str!("../install.sh");
+        let mut spki = vec![0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
+        spki.extend(STANDARD.decode(PUBLIC_KEY).unwrap());
+        assert!(
+            sh.contains(&format!("-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----", STANDARD.encode(spki))),
+            "install.sh has another key"
+        );
+        assert!(sh.contains("pkeyutl -verify") && sh.contains("-rawin"));
+        // the signature check comes before the installer is downloaded, and it is not optional
+        let verify = sh.find("pkeyutl -verify").unwrap();
+        assert!(verify < sh.find("get \"$url\"").unwrap());
+        assert!(sh.contains("nothing is installed"));
+        let ok = std::process::Command::new("sh").arg("-n").arg(concat!(env!("CARGO_MANIFEST_DIR"), "/install.sh")).status().unwrap();
+        assert!(ok.success(), "install.sh does not parse");
     }
 
     #[test]

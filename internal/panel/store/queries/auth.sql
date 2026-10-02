@@ -5,9 +5,6 @@ SELECT value FROM settings WHERE key = ?;
 INSERT INTO settings (key, value) VALUES (?, ?)
 ON CONFLICT (key) DO UPDATE SET value = excluded.value;
 
--- name: ListSettings :many
-SELECT key, value FROM settings ORDER BY key;
-
 -- name: CountAdmins :one
 SELECT count(*) FROM admins;
 
@@ -30,8 +27,10 @@ UPDATE admins SET password_hash = ? WHERE id = ?;
 -- name: SetAdminTOTP :exec
 UPDATE admins SET totp_secret = ?, recovery_codes = ? WHERE id = ?;
 
--- name: SetAdminRecoveryCodes :exec
-UPDATE admins SET recovery_codes = ? WHERE id = ?;
+-- name: SpendAdminRecoveryCodes :execrows
+-- Takes a recovery code out of the list it was found in: 0 rows means another login spent
+-- a code from the same list first, and this one is refused.
+UPDATE admins SET recovery_codes = sqlc.arg(rest) WHERE id = sqlc.arg(id) AND recovery_codes = sqlc.arg(was);
 
 -- name: SetAdminLastLogin :exec
 UPDATE admins SET last_login_at = ? WHERE id = ?;
@@ -67,3 +66,6 @@ VALUES (?, ?, ?, ?, ?, ?, ?);
 
 -- name: ListAudit :many
 SELECT * FROM audit_log WHERE id < sqlc.arg(before_id) ORDER BY id DESC LIMIT sqlc.arg(lim);
+
+-- name: PruneAudit :execrows
+DELETE FROM audit_log WHERE ts < ?;

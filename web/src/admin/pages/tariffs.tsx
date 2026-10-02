@@ -1,16 +1,23 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Archive, Pencil, Plus } from "lucide-react";
+import { useNavigate, useSearch } from "@tanstack/react-router";
+import { Archive, Layers, Package, Pencil, Plus, Tag } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { api, ApiError, errorText, unwrap, type Schemas, type Tariff } from "../../api/client";
-import { qk, useTariffs } from "../../api/hooks";
+import { qk, usePaymentSettings, usePools, useTariffs } from "../../api/hooks";
 import { Confirm, Drawer } from "../../components/overlay";
+import { QueryBoundary } from "../../components/query";
+import { Tabs } from "../../components/tabs";
 import { useToast } from "../../components/toast";
-import { Button, EmptyState, ErrorState, Field, PageHeader, Pill, Segmented, Skeleton, Switch } from "../../components/ui";
+import { Button, EmptyState, Field, PageHeader, Pill, Segmented, Skeleton } from "../../components/ui";
+import { Switch } from "../../components/switch";
 import { t } from "../../i18n";
 import { bytes, days, GiB, months, rubles, termMonths } from "../../lib/format";
+import { TARIFF_TABS } from "../search";
+import { PackagesCard } from "./packages";
+import { PoolLimitsField, PoolsCard } from "./pools";
 
 /** How long a term on the tariff runs: days, or months up to the billing day. */
-export function tariffTerm(tr: Tariff): string {
+function tariffTerm(tr: Tariff): string {
   if (!tr.duration_days) return t("time.forever");
   if (tr.billing_day != null) return t("tariffs.termToDay", { months: months(termMonths(tr.duration_days)), d: tr.billing_day });
   return days(tr.duration_days);
@@ -30,8 +37,23 @@ export function tariffSummary(tr: Tariff): string {
   return parts.join(" · ");
 }
 
+const TAB_ICONS = { tariffs: Tag, pools: Layers, packages: Package } as const;
+
+/** A tariff's pool limits by pool name: "WL 100 GB"; pools without a limit are left out. */
+function poolLimitsText(tr: Tariff, names: Map<number, string>): string {
+  return tr.pools
+    .filter((p) => p.traffic_limit != null && names.has(p.pool_id))
+    .map((p) => `${names.get(p.pool_id)} ${bytes(p.traffic_limit!)}`)
+    .join(" · ");
+}
+
 export function TariffsPage() {
+  const { tab } = useSearch({ from: "/_app/tariffs" });
+  const navigate = useNavigate({ from: "/tariffs" });
+  const pools = usePools();
+  const poolNames = new Map((pools.data ?? []).map((p) => [p.id, p.name]));
   const tariffs = useTariffs();
+  const selling = usePaymentSettings().data?.enabled === true;
   const [edit, setEdit] = useState<Tariff | "new" | null>(null);
   const [archive, setArchive] = useState<Tariff | null>(null);
   const qc = useQueryClient();
@@ -40,6 +62,7 @@ export function TariffsPage() {
     mutationFn: (id: number) => unwrap(api.DELETE("/api/v1/tariffs/{id}", { params: { path: { id } } })),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: qk.tariffs });
+      void qc.invalidateQueries({ queryKey: qk.paymentSettings });
       toast.ok(t("tariffs.archived"));
       setArchive(null);
     },
@@ -52,65 +75,94 @@ export function TariffsPage() {
         title={t("nav.tariffs")}
         sub={t("tariffs.subtitle")}
         actions={
-          <Button variant="primary" onClick={() => setEdit("new")}>
-            <Plus size={18} aria-hidden />
-            <span className="max-[760px]:hidden">{t("tariffs.new")}</span>
-          </Button>
+          tab === "tariffs" ? (
+            <Button variant="primary" onClick={() => setEdit("new")}>
+              <Plus size={18} aria-hidden />
+              <span className="max-[760px]:hidden">{t("tariffs.new")}</span>
+            </Button>
+          ) : null
         }
       />
-      {tariffs.isPending ? (
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-          {[0, 1, 2].map((i) => (
-            <Skeleton key={i} style={{ height: 180, borderRadius: 20 }} />
-          ))}
-        </div>
-      ) : tariffs.isError ? (
-        <section className="card glass">
-          <ErrorState text={errorText(tariffs.error)} onRetry={() => void tariffs.refetch()} />
-        </section>
-      ) : tariffs.data.length === 0 ? (
-        <section className="card glass">
-          <EmptyState title={t("tariffs.emptyTitle")} text={t("tariffs.emptyText")}>
-            <Button variant="primary" onClick={() => setEdit("new")}>
-              <Plus size={18} aria-hidden /> {t("tariffs.new")}
-            </Button>
-          </EmptyState>
-        </section>
-      ) : (
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-          {tariffs.data.map((tr, i) => (
-            <section key={tr.id} className="card glass reveal flex flex-col" style={{ "--i": i } as React.CSSProperties}>
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <h2 className="font-display text-xl font-medium tracking-tight">{tr.name}</h2>
-                  {tr.price_label ? <div className="mt-1 text-[13px] font-medium text-[var(--mikan-700)]">{tr.price_label}</div> : null}
-                  {tr.on_sale ? (
-                    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-[var(--ink-600)]">
-                      <Pill tone="ok">{t("tariffs.onSale")}</Pill>
-                      {tr.price_stars != null ? <span className="num">⭐ {tr.price_stars}</span> : null}
-                      {tr.price_rub != null ? <span className="num">{rubles(tr.price_rub)}</span> : null}
-                    </div>
-                  ) : null}
-                </div>
-                <div className="flex gap-1">
-                  <button type="button" className="icon-btn" aria-label={t("tariffs.editLabel", { name: tr.name })} onClick={() => setEdit(tr)}>
-                    <Pencil size={16} />
-                  </button>
-                  <button type="button" className="icon-btn" aria-label={t("tariffs.archiveLabel", { name: tr.name })} onClick={() => setArchive(tr)}>
-                    <Archive size={16} />
-                  </button>
-                </div>
+      <Tabs
+        id="tariffs"
+        label={t("tariffs.sections")}
+        tabs={TARIFF_TABS.map((id) => ({ id, label: t(`tariffs.tabs.${id}`), icon: TAB_ICONS[id] }))}
+        value={tab}
+        onChange={(next) => void navigate({ search: { tab: next }, replace: true })}
+      >
+        {tab === "pools" ? (
+          <div className="max-w-4xl">
+            <PoolsCard />
+          </div>
+        ) : tab === "packages" ? (
+          <div className="max-w-4xl">
+            <PackagesCard />
+          </div>
+        ) : (
+          <QueryBoundary
+            query={tariffs}
+            pending={
+              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                {[0, 1, 2].map((i) => (
+                  <Skeleton key={i} style={{ height: 180, borderRadius: 20 }} />
+                ))}
               </div>
-              <dl className="mt-5 grid grid-cols-2 gap-3 text-xs text-[var(--ink-500)]">
-                <Item label={t("users.colTraffic")} value={tr.traffic_limit != null ? bytes(tr.traffic_limit) : t("users.unlimited")} />
-                <Item label={t("users.colExpiry")} value={tariffTerm(tr)} />
-                <Item label={t("users.colDevices")} value={tr.device_limit != null ? String(tr.device_limit) : t("users.unlimited")} />
-                <Item label={t("tariffs.reset")} value={resetLabel(tr)} />
-              </dl>
-            </section>
-          ))}
-        </div>
-      )}
+            }
+            wrap={(state) => <section className="card glass">{state}</section>}
+          >
+            {(list) =>
+              list.length === 0 ? (
+                <section className="card glass">
+                  <EmptyState title={t("tariffs.emptyTitle")} text={t("tariffs.emptyText")}>
+                    <Button variant="primary" onClick={() => setEdit("new")}>
+                      <Plus size={18} aria-hidden /> {t("tariffs.new")}
+                    </Button>
+                  </EmptyState>
+                </section>
+              ) : (
+                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                  {list.map((tr, i) => (
+                    <section key={tr.id} className="card glass reveal flex flex-col" style={{ "--i": i } as React.CSSProperties}>
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <h2 className="font-display text-xl font-medium tracking-tight">{tr.name}</h2>
+                          {tr.price_label ? <div className="mt-1 text-[13px] font-medium text-[var(--mikan-700)]">{tr.price_label}</div> : null}
+                          {selling && tr.on_sale ? (
+                            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-[var(--ink-600)]">
+                              <Pill tone="ok">{t("tariffs.onSale")}</Pill>
+                              {tr.price_stars != null ? <span className="num">⭐ {tr.price_stars}</span> : null}
+                              {tr.price_rub != null ? <span className="num">{rubles(tr.price_rub)}</span> : null}
+                            </div>
+                          ) : null}
+                        </div>
+                        <div className="flex gap-1">
+                          <button type="button" className="icon-btn" aria-label={t("tariffs.editLabel", { name: tr.name })} onClick={() => setEdit(tr)}>
+                            <Pencil size={16} />
+                          </button>
+                          <button type="button" className="icon-btn" aria-label={t("tariffs.archiveLabel", { name: tr.name })} onClick={() => setArchive(tr)}>
+                            <Archive size={16} />
+                          </button>
+                        </div>
+                      </div>
+                      <dl className="mt-5 grid grid-cols-2 gap-3 text-xs text-[var(--ink-500)]">
+                        <Item label={t("users.colTraffic")} value={tr.traffic_limit != null ? bytes(tr.traffic_limit) : t("users.unlimited")} />
+                        <Item label={t("users.colExpiry")} value={tariffTerm(tr)} />
+                        <Item label={t("users.colDevices")} value={tr.device_limit != null ? String(tr.device_limit) : t("users.unlimited")} />
+                        <Item label={t("tariffs.reset")} value={resetLabel(tr)} />
+                        {poolLimitsText(tr, poolNames) ? (
+                          <div className="col-span-2">
+                            <Item label={t("pools.tariffLimits")} value={poolLimitsText(tr, poolNames)} />
+                          </div>
+                        ) : null}
+                      </dl>
+                    </section>
+                  ))}
+                </div>
+              )
+            }
+          </QueryBoundary>
+        )}
+      </Tabs>
       <TariffDrawer tariff={edit} onClose={() => setEdit(null)} />
       <Confirm
         open={!!archive}
@@ -149,6 +201,10 @@ function TariffDrawer({ tariff, onClose }: { tariff: Tariff | "new" | null; onCl
   const [reset, setReset] = useState<Tariff["reset_strategy"]>("period");
   const [price, setPrice] = useState("");
   const [onSale, setOnSale] = useState(false);
+  const allPools = usePools();
+  // With selling off the sale block is hidden; its values stay as they were.
+  const selling = usePaymentSettings().data?.enabled === true;
+  const [poolGB, setPoolGB] = useState<Record<number, string>>({});
   const [stars, setStars] = useState("");
   const [rub, setRub] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -168,6 +224,7 @@ function TariffDrawer({ tariff, onClose }: { tariff: Tariff | "new" | null; onCl
     setReset(tr?.reset_strategy ?? "period");
     setPrice(tr?.price_label ?? "");
     setOnSale(tr?.on_sale ?? false);
+    setPoolGB(Object.fromEntries((tr?.pools ?? []).map((p) => [p.pool_id, p.traffic_limit != null ? String(+(p.traffic_limit / GiB).toFixed(2)) : ""])));
     setStars(tr?.price_stars != null ? String(tr.price_stars) : "");
     setRub(tr?.price_rub != null ? String(tr.price_rub / 100) : "");
     setErrors({});
@@ -178,6 +235,7 @@ function TariffDrawer({ tariff, onClose }: { tariff: Tariff | "new" | null; onCl
       tariff === "new" || !tariff ? unwrap(api.POST("/api/v1/tariffs", { body })) : unwrap(api.PUT("/api/v1/tariffs/{id}", { params: { path: { id: tariff.id } }, body })),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: qk.tariffs });
+      void qc.invalidateQueries({ queryKey: qk.paymentSettings });
       toast.ok(tariff === "new" ? t("tariffs.created") : t("tariffs.saved"));
       onClose();
     },
@@ -195,6 +253,11 @@ function TariffDrawer({ tariff, onClose }: { tariff: Tariff | "new" | null; onCl
     const monN = Number(monthsN);
     const dayN = Number(billingDay);
     const devN = Number(devices);
+    const poolLimits = (allPools.data ?? []).map((p) => {
+      const v = (poolGB[p.id] ?? "").trim().replace(",", ".");
+      return { pool_id: p.id, traffic_limit: v ? Math.round(Number(v) * GiB) : null };
+    });
+    if (poolLimits.some((p) => p.traffic_limit !== null && (!Number.isFinite(p.traffic_limit) || p.traffic_limit <= 0))) errs.pools = t("pools.errLimit");
     const toDay = term === "day";
     if (!name.trim()) errs.name = t("tariffs.errName");
     if (!unlimited && (!Number.isFinite(gbN) || gbN <= 0)) errs.traffic_limit = t("tariffs.errTraffic");
@@ -221,6 +284,7 @@ function TariffDrawer({ tariff, onClose }: { tariff: Tariff | "new" | null; onCl
       price_stars: stars.trim() ? starsN : undefined,
       price_rub: rub.trim() ? rubN : undefined,
       on_sale: onSale,
+      pools: poolLimits,
       // PUT replaces the tariff: keep its place in the list.
       sort: tariff && tariff !== "new" ? tariff.sort : undefined,
     });
@@ -316,33 +380,42 @@ function TariffDrawer({ tariff, onClose }: { tariff: Tariff | "new" | null; onCl
             />
           </Field>
         ) : null}
+        {allPools.data?.length ? (
+          <Field label={t("pools.tariffLimits")} hint={t("pools.tariffLimitsHint")} error={errors.pools}>
+            <PoolLimitsField pools={allPools.data} value={poolGB} onChange={setPoolGB} />
+          </Field>
+        ) : null}
         <div className="border-t border-[var(--hairline)] pt-4" role="group" aria-label={t("tariffs.sale")}>
-          <div className="mb-3 flex items-start justify-between gap-3">
-            <div>
-              <div className="text-[13px] font-semibold">{t("tariffs.sale")}</div>
-              <div className="text-xs text-[var(--ink-500)]">{t("tariffs.saleSub")}</div>
-            </div>
-            <Switch checked={onSale} onChange={setOnSale} label={t("tariffs.onSale")} />
-          </div>
-          {errors.on_sale ? (
-            <p className="mb-3 text-xs text-[var(--berry-600)]" role="alert">
-              {errors.on_sale}
-            </p>
+          {selling ? (
+            <>
+              <div className="mb-3 flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-[13px] font-semibold">{t("tariffs.sale")}</div>
+                  <div className="text-xs text-[var(--ink-500)]">{t("tariffs.saleSub")}</div>
+                </div>
+                <Switch checked={onSale} onChange={setOnSale} label={t("tariffs.onSale")} />
+              </div>
+              {errors.on_sale ? (
+                <p className="mb-3 text-xs text-[var(--berry-600)]" role="alert">
+                  {errors.on_sale}
+                </p>
+              ) : null}
+              <div className="grid gap-x-3 sm:grid-cols-2">
+                <Field label={t("tariffs.priceStars")} htmlFor="t-stars" hint={t("tariffs.priceStarsHint")} error={errors.price_stars}>
+                  <div className="flex items-center gap-2">
+                    <input id="t-stars" className="input max-w-[140px]" inputMode="numeric" value={stars} onChange={(e) => setStars(e.target.value)} placeholder="150" aria-invalid={!!errors.price_stars} />
+                    <span className="text-[var(--ink-500)]">⭐</span>
+                  </div>
+                </Field>
+                <Field label={t("tariffs.priceRub")} htmlFor="t-rub" hint={t("tariffs.priceRubHint")} error={errors.price_rub}>
+                  <div className="flex items-center gap-2">
+                    <input id="t-rub" className="input max-w-[140px]" inputMode="decimal" value={rub} onChange={(e) => setRub(e.target.value)} placeholder="199" aria-invalid={!!errors.price_rub} />
+                    <span className="text-[var(--ink-500)]">₽</span>
+                  </div>
+                </Field>
+              </div>
+            </>
           ) : null}
-          <div className="grid gap-x-3 sm:grid-cols-2">
-            <Field label={t("tariffs.priceStars")} htmlFor="t-stars" hint={t("tariffs.priceStarsHint")} error={errors.price_stars}>
-              <div className="flex items-center gap-2">
-                <input id="t-stars" className="input max-w-[140px]" inputMode="numeric" value={stars} onChange={(e) => setStars(e.target.value)} placeholder="150" aria-invalid={!!errors.price_stars} />
-                <span className="text-[var(--ink-500)]">⭐</span>
-              </div>
-            </Field>
-            <Field label={t("tariffs.priceRub")} htmlFor="t-rub" hint={t("tariffs.priceRubHint")} error={errors.price_rub}>
-              <div className="flex items-center gap-2">
-                <input id="t-rub" className="input max-w-[140px]" inputMode="decimal" value={rub} onChange={(e) => setRub(e.target.value)} placeholder="199" aria-invalid={!!errors.price_rub} />
-                <span className="text-[var(--ink-500)]">₽</span>
-              </div>
-            </Field>
-          </div>
           <Field label={t("tariffs.price")} htmlFor="t-price" hint={t("tariffs.priceHint")}>
             <input id="t-price" className="input" value={price} onChange={(e) => setPrice(e.target.value)} maxLength={40} placeholder={t("tariffs.pricePlaceholder")} />
           </Field>

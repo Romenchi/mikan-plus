@@ -4,7 +4,6 @@ import (
 	"context"
 	"net"
 	"net/http"
-	"net/netip"
 	"strconv"
 	"sync"
 	"time"
@@ -43,6 +42,13 @@ func (h *handlers) registerTargets() {
 	huma.Register(h.api, huma.Operation{OperationID: "scan-targets", Method: http.MethodPost, Path: "/api/v1/inbounds/scan-targets", Summary: "Подобрать цели REALITY рядом с сервером", Tags: []string{"inbounds"}}, h.scanTargets)
 }
 
+// scanOptions is where the panel's own checks may connect: public addresses, and its own
+// port on loopback (self-steal). The name is resolved once and the address checked: a
+// name that leads inside is refused as private.
+func (h *handlers) scanOptions(ctx context.Context) scan.Options {
+	return scan.Options{LoopbackPort: h.panelPort(ctx), Resolve: h.d.Resolve}
+}
+
 func (h *handlers) panelPort(ctx context.Context) int {
 	p, _, _ := settings.Get[int](ctx, h.d.Settings, settings.KeyPanelPort)
 	return p
@@ -55,13 +61,17 @@ func (h *handlers) checkTarget(ctx context.Context, in *checkTargetInput) (*chec
 	}
 	// The check dials from the server; internal addresses are not its business, except the
 	// panel's own port (self-steal).
+	dest := in.Body.Dest
 	selfSteal := (host == "127.0.0.1" || host == "localhost") && port == strconv.Itoa(h.panelPort(ctx))
 	if !selfSteal && !proto.PublicHost(host) {
 		return nil, huma.Error422UnprocessableEntity("bad_dest", &huma.ErrorDetail{Location: "body.dest", Message: "reality_dest_private"})
 	}
+	if selfSteal {
+		dest = net.JoinHostPort("127.0.0.1", port) // the check takes the literal address only
+	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	return &checkTargetOutput{Body: scan.Check(ctx, in.Body.Dest, in.Body.SNI)}, nil
+	return &checkTargetOutput{Body: scan.Check(ctx, dest, in.Body.SNI, h.scanOptions(ctx))}, nil
 }
 
 type scanTargetsInput struct {
@@ -88,13 +98,9 @@ func (h *handlers) scanTargets(ctx context.Context, in *scanTargetsInput) (*scan
 	if !local {
 		publicHost, domain = node.PublicHost, ""
 	}
-	ip := publicHost
-	if _, err := netip.ParseAddr(ip); err != nil {
-		addrs, err := net.DefaultResolver.LookupNetIP(ctx, "ip4", publicHost)
-		if err != nil || len(addrs) == 0 {
-			return nil, huma.Error422UnprocessableEntity("scan_no_ip")
-		}
-		ip = addrs[0].String()
+	ip, err := scan.ResolveIPv4(ctx, publicHost)
+	if err != nil {
+		return nil, huma.Error422UnprocessableEntity("scan_no_ip")
 	}
 	out := &scanTargetsOutput{}
 	out.Body.IP = ip
@@ -102,7 +108,7 @@ func (h *handlers) scanTargets(ctx context.Context, in *scanTargetsInput) (*scan
 	// panel with its Let's Encrypt certificate.
 	if local && domain != "" && h.d.Cert != nil && h.d.Cert().Kind == "letsencrypt" {
 		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		r := scan.Check(cctx, net.JoinHostPort("127.0.0.1", strconv.Itoa(h.panelPort(ctx))), domain)
+		r := scan.Check(cctx, net.JoinHostPort("127.0.0.1", strconv.Itoa(h.panelPort(ctx))), domain, h.scanOptions(ctx))
 		cancel()
 		out.Body.SelfSteal = &r
 	}
@@ -117,7 +123,7 @@ func (h *handlers) scanTargets(ctx context.Context, in *scanTargetsInput) (*scan
 	if !fromNode {
 		sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
-		if out.Body.Results, out.Body.Scanned, err = scan.Neighbors(sctx, ip, 12); err != nil && sctx.Err() == nil {
+		if out.Body.Results, out.Body.Scanned, err = scan.Neighbors(sctx, ip, 12, scan.Options{}); err != nil && sctx.Err() == nil {
 			return nil, huma.Error422UnprocessableEntity("scan_no_ip")
 		}
 	}

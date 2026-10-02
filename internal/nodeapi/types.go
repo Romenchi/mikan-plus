@@ -4,6 +4,7 @@ package nodeapi
 
 import (
 	"encoding/json"
+	"strconv"
 	"time"
 
 	"mikan/internal/proto"
@@ -30,8 +31,12 @@ type DesiredState struct {
 	SelfStealPort int `json:"self_steal_port,omitempty"`
 	// Warp is Cloudflare WARP as an outbound; nil: everything leaves directly.
 	Warp *Warp `json:"warp,omitempty"`
-	// Relay is an upstream proxy (e.g. VLESS Reality to Germany); nil: direct exit.
+	// Relay is the hidden listener other nodes send their chosen traffic out through;
+	// Exits are the other nodes this one sends chosen inbounds through (a cascade).
 	Relay *Relay `json:"relay,omitempty"`
+	Exits []Exit `json:"exits,omitempty"`
+	// UpstreamRelay routes node traffic through an upstream proxy (e.g. VLESS Reality to Germany).
+	UpstreamRelay *UpstreamRelay `json:"upstream_relay,omitempty"`
 }
 
 type Inbound struct {
@@ -43,6 +48,9 @@ type Inbound struct {
 	// from a saved state, the panel no longer sends them.
 	Preset   string          `json:"preset,omitempty"`
 	Settings json.RawMessage `json:"settings,omitempty"`
+	// Pool is the traffic pool the inbound counts to ("" = the main quota): its own
+	// limit per user, separate from the rest (GitHub issue #6).
+	Pool string `json:"pool,omitempty"`
 }
 
 type Slot = proto.Slot
@@ -63,15 +71,14 @@ type Policy struct {
 	// OtherIPs are the slot's devices on the panel's other nodes: they count against
 	// DeviceLimit here too, and may connect here without taking another device.
 	OtherIPs []string `json:"other_ips,omitempty"`
+	// Pools are the slot's quotas in traffic pools; a pool not listed has no limit.
+	// QuotaRemaining is then the quota of the inbounds outside every pool.
+	Pools []PoolQuota `json:"pools,omitempty"`
 }
 
 type PoliciesRequest struct {
 	Epoch    string   `json:"epoch"`
 	Policies []Policy `json:"policies"`
-}
-
-type KickRequest struct {
-	Slots []string `json:"slots"`
 }
 
 type AckRequest struct {
@@ -87,10 +94,15 @@ type TLSFiles struct {
 // Counters is a batch of traffic deltas. The node returns the same batch until it is
 // acknowledged, so the panel can apply it idempotently by (Epoch, Seq).
 type Counters struct {
-	Epoch  string             `json:"epoch"`
-	Seq    int64              `json:"seq"`
-	Slots  map[string]Traffic `json:"slots"`
-	Online map[string]Online  `json:"online"` // live view, not part of the batch
+	Epoch  string                        `json:"epoch"`
+	Seq    int64                         `json:"seq"`
+	Slots  map[string]Traffic            `json:"slots"`           // outside every pool
+	Pools  map[string]map[string]Traffic `json:"pools,omitempty"` // slot → pool → traffic
+	Online map[string]Online             `json:"online"`          // live view, not part of the batch
+	// Idle: no batch was cut because there was no traffic to report. There is nothing to
+	// store and nothing to acknowledge; only Online is of use. Nodes before 0.4.4 cut an
+	// empty batch instead, which must be acknowledged like any other.
+	Idle bool `json:"idle,omitempty"`
 }
 
 type Traffic struct {
@@ -168,12 +180,6 @@ type ApplyResult struct {
 	Listeners []ListenerStatus `json:"listeners"`
 }
 
-type LogLine struct {
-	Time    time.Time `json:"time"`
-	Level   string    `json:"level"`
-	Message string    `json:"message"`
-}
-
 type Error struct {
 	Code    string `json:"code"` // invalid_state | apply_failed | not_ready | bad_request
 	Message string `json:"message"`
@@ -240,8 +246,8 @@ type WarpStatus struct {
 	CheckedAt  time.Time `json:"checked_at"`
 }
 
-// Relay routes node traffic through an upstream proxy (e.g. VLESS Reality to Germany).
-type Relay struct {
+// UpstreamRelay routes node traffic through an upstream proxy (e.g. VLESS Reality to Germany).
+type UpstreamRelay struct {
 	Enabled     bool     `json:"enabled"`
 	Protocol    string   `json:"protocol"` // "vless", "socks5", "shadowsocks"
 	Server      string   `json:"server"`
@@ -255,4 +261,39 @@ type Relay struct {
 	SpiderX     string   `json:"spider_x,omitempty"`
 	Fingerprint string   `json:"fingerprint,omitempty"`
 	Inbounds    []string `json:"inbounds,omitempty"`
+}
+
+// RelayListener names the relay's listener. It cannot clash with an inbound: their
+// names are [a-z0-9-].
+const RelayListener = "mikan~relay"
+
+// Relay is a node's door for other nodes of the panel: a VLESS REALITY listener with a
+// key per source node. Its connections carry no subscriber, so they pass the per-user
+// accounting and limits (the source node already applied them); the REJECT rules still
+// hold. Where the relay's traffic leaves is decided like any inbound's: IN-NAME rules of
+// Warp.Inbounds or an Exit's Inbounds may name RelayListener.
+type Relay struct {
+	Port   string          `json:"port"`
+	Config json.RawMessage `json:"config"` // proto.Template as JSON
+	Users  []Slot          `json:"users"`  // one per source node
+}
+
+// Exit is another node as an outbound: Proxy is the mihomo proxy reaching its relay,
+// Inbounds the local listeners (RelayListener included) whose traffic goes there.
+type Exit struct {
+	Name     string          `json:"name"` // the proxy's name in rules, NODE-<id>
+	Proxy    json.RawMessage `json:"proxy"`
+	Inbounds []string        `json:"inbounds"`
+}
+
+// ExitName is the proxy name of node id as an exit.
+func ExitName(id int64) string { return "NODE-" + strconv.FormatInt(id, 10) }
+
+// ProbeResult is the internet as seen through one outbound of the node.
+type ProbeResult = WarpStatus
+
+// PoolQuota is what is left of one traffic pool for a slot, as of the policy's BaseSeq.
+type PoolQuota struct {
+	Pool      string `json:"pool"`
+	Remaining int64  `json:"remaining"` // bytes; -1 = unlimited
 }

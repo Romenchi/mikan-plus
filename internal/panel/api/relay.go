@@ -71,7 +71,7 @@ func (h *handlers) getRelay(ctx context.Context, input *struct {
 		}
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
-	r, err := h.d.Store.Q.GetNodeRelay(ctx, input.ID)
+	r, err := h.d.Store.Q.GetNodeUpstreamRelay(ctx, input.ID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return &relayOutput{Body: RelayView{Configured: false, Inbounds: []string{}}}, nil
 	}
@@ -146,7 +146,7 @@ func (h *handlers) putRelay(ctx context.Context, input *relayInput) (*relayOutpu
 	}
 
 	b := input.Body
-	existing, err := h.d.Store.Q.GetNodeRelay(ctx, input.ID)
+	existing, err := h.d.Store.Q.GetNodeUpstreamRelay(ctx, input.ID)
 	hasExisting := err == nil
 
 	enabled := int64(1)
@@ -236,7 +236,7 @@ func (h *handlers) putRelay(ctx context.Context, input *relayInput) (*relayOutpu
 		created = existing.CreatedAt
 	}
 
-	if err := h.d.Store.Q.SaveNodeRelay(ctx, db.SaveNodeRelayParams{
+	if err := h.d.Store.Q.SaveNodeUpstreamRelay(ctx, db.SaveNodeUpstreamRelayParams{
 		NodeID:      input.ID,
 		Enabled:     enabled,
 		Protocol:    protocol,
@@ -289,7 +289,7 @@ func (h *handlers) putRelay(ctx context.Context, input *relayInput) (*relayOutpu
 func (h *handlers) deleteRelay(ctx context.Context, input *struct {
 	ID int64 `path:"id" minimum:"1"`
 }) (*struct{}, error) {
-	if err := h.d.Store.Q.DeleteNodeRelay(ctx, input.ID); err != nil {
+	if err := h.d.Store.Q.DeleteNodeUpstreamRelay(ctx, input.ID); err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
 	if h.d.Nodes != nil {

@@ -58,8 +58,10 @@ type apiKeysOutput struct{ Body []APIKeyView }
 type createAPIKeyInput struct {
 	Body struct {
 		Name       string `json:"name" minLength:"1" maxLength:"60"`
-		Scope      string `json:"scope" enum:"read,full" doc:"read — только GET-запросы, full — всё, кроме входа, сессий и ключей"`
+		Scope      string `json:"scope" enum:"read,full" doc:"read — только GET-запросы, без ссылок подписок и секретных адресов; full — изменения, кроме входа, сессий, ключей и операций, где уходят деньги, ключи и адреса клиентов (в справочнике помечены «только сессия»)"`
 		ExpireDays int    `json:"expire_days,omitempty" minimum:"0" maximum:"3650" doc:"Срок в днях; 0 — пока не отзовут"`
+		Password   string `json:"password" minLength:"1" maxLength:"256" doc:"Пароль админа: ключ не выпускается из одной лишь украденной сессии"`
+		TOTP       string `json:"totp,omitempty" maxLength:"16" doc:"Код из приложения, если включена 2FA"`
 	}
 }
 
@@ -116,6 +118,13 @@ func (h *handlers) createAPIKey(ctx context.Context, in *createAPIKeyInput) (*cr
 	if name == "" {
 		return nil, huma.Error422UnprocessableEntity("validation", &huma.ErrorDetail{Location: "body.name", Message: "name_blank"})
 	}
+	admin, err := h.d.Store.Q.GetAdmin(ctx, sessionOf(ctx).AdminID)
+	if err != nil {
+		return nil, err
+	}
+	if err := h.reauth(ctx, admin, in.Body.Password, strings.TrimSpace(in.Body.TOTP)); err != nil {
+		return nil, err
+	}
 	n, err := h.d.Store.Q.CountAPIKeys(ctx)
 	if err != nil {
 		return nil, err
@@ -155,7 +164,7 @@ func (h *handlers) deleteAPIKey(ctx context.Context, in *apiKeyIDInput) (*struct
 // bearer authenticates a request by API key; the caller has seen an Authorization header.
 func (h *handlers) bearer(ctx huma.Context, next func(huma.Context), mutating bool) {
 	c := clientOf(ctx.Context())
-	ipKey, now := "key:"+c.IP, h.d.Now()
+	ipKey, now := "key:"+limitIP(c.IP), h.d.Now()
 	if ok, wait := h.d.IPLimit.Allowed(ipKey, now); !ok {
 		ctx.SetHeader("Retry-After", strconv.Itoa(max(1, int(wait.Round(time.Second)/time.Second))))
 		_ = huma.WriteErr(h.api, ctx, http.StatusTooManyRequests, "rate_limited")

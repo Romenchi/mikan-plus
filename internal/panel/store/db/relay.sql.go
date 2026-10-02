@@ -4,22 +4,22 @@ import (
 	"context"
 )
 
-const deleteNodeRelay = `-- name: DeleteNodeRelay :exec
+const deleteNodeUpstreamRelay = `-- name: DeleteNodeUpstreamRelay :exec
 DELETE FROM node_relay WHERE node_id = ?
 `
 
-func (q *Queries) DeleteNodeRelay(ctx context.Context, nodeID int64) error {
-	_, err := q.db.ExecContext(ctx, deleteNodeRelay, nodeID)
+func (q *Queries) DeleteNodeUpstreamRelay(ctx context.Context, nodeID int64) error {
+	_, err := q.db.ExecContext(ctx, deleteNodeUpstreamRelay, nodeID)
 	return err
 }
 
-const getNodeRelay = `-- name: GetNodeRelay :one
+const getNodeUpstreamRelay = `-- name: GetNodeUpstreamRelay :one
 SELECT node_id, enabled, protocol, server, port, uuid, flow, tls, sni, public_key, short_id, spider_x, fingerprint, inbounds, created_at, updated_at FROM node_relay WHERE node_id = ?
 `
 
-func (q *Queries) GetNodeRelay(ctx context.Context, nodeID int64) (NodeRelay, error) {
-	row := q.db.QueryRowContext(ctx, getNodeRelay, nodeID)
-	var i NodeRelay
+func (q *Queries) GetNodeUpstreamRelay(ctx context.Context, nodeID int64) (NodeUpstreamRelay, error) {
+	row := q.db.QueryRowContext(ctx, getNodeUpstreamRelay, nodeID)
+	var i NodeUpstreamRelay
 	err := row.Scan(
 		&i.NodeID,
 		&i.Enabled,
@@ -41,7 +41,7 @@ func (q *Queries) GetNodeRelay(ctx context.Context, nodeID int64) (NodeRelay, er
 	return i, err
 }
 
-const saveNodeRelay = `-- name: SaveNodeRelay :exec
+const saveNodeUpstreamRelay = `-- name: SaveNodeUpstreamRelay :exec
 INSERT INTO node_relay (node_id, enabled, protocol, server, port, uuid, flow, tls, sni, public_key, short_id, spider_x, fingerprint, inbounds, created_at, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (node_id) DO UPDATE SET enabled = excluded.enabled, protocol = excluded.protocol, server = excluded.server,
@@ -50,7 +50,7 @@ ON CONFLICT (node_id) DO UPDATE SET enabled = excluded.enabled, protocol = exclu
   inbounds = excluded.inbounds, updated_at = excluded.updated_at
 `
 
-type SaveNodeRelayParams struct {
+type SaveNodeUpstreamRelayParams struct {
 	NodeID      int64
 	Enabled     int64
 	Protocol    string
@@ -69,8 +69,8 @@ type SaveNodeRelayParams struct {
 	UpdatedAt   int64
 }
 
-func (q *Queries) SaveNodeRelay(ctx context.Context, arg SaveNodeRelayParams) error {
-	_, err := q.db.ExecContext(ctx, saveNodeRelay,
+func (q *Queries) SaveNodeUpstreamRelay(ctx context.Context, arg SaveNodeUpstreamRelayParams) error {
+	_, err := q.db.ExecContext(ctx, saveNodeUpstreamRelay,
 		arg.NodeID,
 		arg.Enabled,
 		arg.Protocol,
@@ -90,3 +90,4 @@ func (q *Queries) SaveNodeRelay(ctx context.Context, arg SaveNodeRelayParams) er
 	)
 	return err
 }
+

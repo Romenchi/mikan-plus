@@ -1,14 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as Menu from "@radix-ui/react-dropdown-menu";
 import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
-import { ArrowUpCircle, Bot, Braces, LayoutDashboard, LogOut, MoreHorizontal, Network, Server, SlidersHorizontal, Tag, Users, Wallet } from "lucide-react";
+import { ArrowUpCircle, Bot, LayoutDashboard, LogOut, MoreHorizontal, Network, Server, SlidersHorizontal, Tag, Users, Wallet } from "lucide-react";
 import { api, unwrap } from "../api/client";
-import { meQuery, useNode, useOverview, useUpdates } from "../api/hooks";
+import { meQuery, useNode, useOverview, usePaymentSettings, useUpdates } from "../api/hooks";
 import { Logo } from "../components/atmosphere";
 import { LangSwitch } from "../components/lang";
 import { ThemeToggle } from "../components/theme-toggle";
 import { Avatar, Bar, Pill } from "../components/ui";
-import { t } from "../i18n";
+import { t, useLocale } from "../i18n";
 import { num, uptime } from "../lib/format";
 
 const NAV = [
@@ -19,11 +19,18 @@ const NAV = [
   { to: "/nodes", key: "nodes", icon: Network },
   { to: "/payments", key: "payments", icon: Wallet },
   { to: "/telegram", key: "telegram", icon: Bot },
-  { to: "/api-docs", key: "api", icon: Braces },
   { to: "/settings", key: "settings", icon: SlidersHorizontal },
 ] as const;
 
+// Payments shows in the menu only while selling is on; the page stays reachable from Settings.
+function useNav() {
+  const payments = usePaymentSettings();
+  return NAV.filter((n) => n.to !== "/payments" || payments.data?.enabled === true);
+}
+
 export function Shell() {
+  useLocale(); // the sidebar and the bar read their texts at render time
+  const nav = useNav();
   const overview = useOverview();
   return (
     <>
@@ -34,7 +41,7 @@ export function Shell() {
             <span className="brand-name">mikan+</span>
           </div>
           <nav className="nav" aria-label={t("shell.sections")}>
-            {NAV.map((n) => (
+            {nav.map((n) => (
               <Link key={n.to} to={n.to} className="nav-item" activeProps={{ className: "active", "aria-current": "page" }} activeOptions={{ exact: n.to === "/" }} title={t(`nav.${n.key}`)}>
                 <n.icon size={18} aria-hidden />
                 <span className="nav-label">{t(`nav.${n.key}`)}</span>
@@ -65,11 +72,12 @@ const MOBILE_MAIN = 4;
 function MobileNav() {
   const path = useRouterState({ select: (s) => s.location.pathname });
   const navigate = useNavigate();
-  const more = NAV.slice(MOBILE_MAIN);
+  const nav = useNav();
+  const more = nav.slice(MOBILE_MAIN);
   const inMore = more.some((n) => path.endsWith(n.to));
   return (
     <nav className="mnav glass" aria-label={t("shell.sections")}>
-      {NAV.slice(0, MOBILE_MAIN).map((n) => (
+      {nav.slice(0, MOBILE_MAIN).map((n) => (
         <Link key={n.to} to={n.to} activeProps={{ className: "active", "aria-current": "page" }} activeOptions={{ exact: n.to === "/" }}>
           <n.icon size={20} aria-hidden />
           <span>{t(`navShort.${n.key}`)}</span>
@@ -101,7 +109,7 @@ function UpdateChip() {
   const u = useUpdates();
   if (!u.data?.available) return null;
   return (
-    <Link to="/settings" hash="updates" className="update-chip" title={t("shell.updateHint")}>
+    <Link to="/settings" search={{ tab: "general" }} hash="updates" className="update-chip" title={t("shell.updateHint")}>
       <ArrowUpCircle size={16} aria-hidden />
       <span className="truncate">{t("shell.update", { v: u.data.latest })}</span>
     </Link>
@@ -130,10 +138,10 @@ function NodeCard() {
       {n.ok ? (
         <div className="node-bars">
           <span>CPU</span>
-          <Bar pct={n.system.cpu_percent} />
+          <Bar pct={n.system.cpu_percent} label="CPU" />
           <span className="num">{Math.round(n.system.cpu_percent)}%</span>
           <span>RAM</span>
-          <Bar pct={memPct} />
+          <Bar pct={memPct} label="RAM" />
           <span className="num">{Math.round(memPct)}%</span>
         </div>
       ) : null}

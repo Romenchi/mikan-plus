@@ -1,6 +1,7 @@
 package tgbot
 
 import (
+	"container/list"
 	"context"
 	"errors"
 	"sync"
@@ -90,23 +91,29 @@ type Outbox struct {
 	log  func(error)
 	gone func(chat int64) // the user blocked the bot
 
-	mu      sync.Mutex
-	queues  [prioCount][]*job
-	byKey   map[string]*job
-	chats   map[int64]*bucket
-	busy    map[int64]bool // a job of the chat is being sent
-	total   *bucket
-	bulk    *bucket
-	paused  time.Time           // a 429 without a chat in it stops everything until then
-	chatOff map[int64]time.Time // a 429 on a reply stops only that chat
-	wake    chan struct{}
+	mu       sync.Mutex
+	queues   [prioCount]*list.List // of *job, the first to go at the front
+	byKey    map[string]*job
+	chats    map[int64]*bucket
+	busy     map[int64]bool // a job of the chat is being sent
+	total    *bucket
+	bulk     *bucket
+	paused   time.Time           // a 429 without a chat in it stops everything until then
+	chatOff  map[int64]time.Time // a 429 on a reply stops only that chat
+	wake     chan struct{}
+	stopped  chan struct{} // closed when Run ends
+	stopped1 sync.Once
 }
 
 func NewOutbox(c *Client, lim Limits, now func() time.Time, gone func(int64), logErr func(error)) *Outbox {
 	t := now()
-	return &Outbox{c: c, lim: lim, now: now, log: logErr, gone: gone, byKey: map[string]*job{}, chats: map[int64]*bucket{},
+	o := &Outbox{c: c, lim: lim, now: now, log: logErr, gone: gone, byKey: map[string]*job{}, chats: map[int64]*bucket{},
 		busy: map[int64]bool{}, total: newBucket(lim.Total, lim.Total, t), bulk: newBucket(lim.Bulk, lim.Bulk, t),
-		chatOff: map[int64]time.Time{}, wake: make(chan struct{}, 1)}
+		chatOff: map[int64]time.Time{}, wake: make(chan struct{}, 1), stopped: make(chan struct{})}
+	for p := range o.queues {
+		o.queues[p] = list.New()
+	}
+	return o
 }
 
 func (o *Outbox) poke() {
@@ -137,7 +144,7 @@ func (o *Outbox) add(j *job) {
 		}
 		o.byKey[j.key] = j
 	}
-	o.queues[j.prio] = append(o.queues[j.prio], j)
+	o.queues[j.prio].PushBack(j)
 	o.mu.Unlock()
 	o.poke()
 }
@@ -163,7 +170,7 @@ func (o *Outbox) pending(p priority) int {
 	defer o.mu.Unlock()
 	n := 0
 	for i := p; i < prioCount; i++ {
-		n += len(o.queues[i])
+		n += o.queues[i].Len()
 	}
 	return n
 }
@@ -179,8 +186,8 @@ func (o *Outbox) next() (*job, time.Duration) {
 		return nil, o.paused.Sub(now)
 	}
 	for p := range prioCount {
-		q := o.queues[p]
-		for i, j := range q {
+		for e := o.queues[p].Front(); e != nil; e = e.Next() {
+			j := e.Value.(*job)
 			if o.busy[j.chat] || now.Before(j.notBefore) {
 				if now.Before(j.notBefore) {
 					wait = min(wait, j.notBefore.Sub(now))
@@ -212,7 +219,7 @@ func (o *Outbox) next() (*job, time.Duration) {
 			if p != prioReply {
 				o.bulk.take(j.cost)
 			}
-			o.queues[p] = append(q[:i:i], q[i+1:]...)
+			o.queues[p].Remove(e)
 			if j.key != "" && o.byKey[j.key] == j {
 				delete(o.byKey, j.key)
 			}
@@ -237,17 +244,23 @@ func (o *Outbox) Run(ctx context.Context) {
 	o.mu.Lock()
 	var left []*job
 	for p := range o.queues {
-		left = append(left, o.queues[p]...)
-		o.queues[p] = nil
+		for e := o.queues[p].Front(); e != nil; e = e.Next() {
+			left = append(left, e.Value.(*job))
+		}
+		o.queues[p].Init()
 	}
 	o.byKey = map[string]*job{}
 	o.mu.Unlock()
+	o.stopped1.Do(func() { close(o.stopped) })
 	for _, j := range left {
 		if j.done != nil {
 			j.done(context.Canceled)
 		}
 	}
 }
+
+// Stopped is closed once Run has ended and dropped what was queued.
+func (o *Outbox) Stopped() <-chan struct{} { return o.stopped }
 
 func (o *Outbox) work(ctx context.Context) {
 	for ctx.Err() == nil {
@@ -307,7 +320,7 @@ func (o *Outbox) finish(j *job, err error) {
 	}
 	if retry {
 		// Back to the head of its lane: it keeps its turn.
-		o.queues[j.prio] = append([]*job{j}, o.queues[j.prio]...)
+		o.queues[j.prio].PushFront(j)
 	}
 	for chat, t := range o.chatOff {
 		if !now.Before(t) {

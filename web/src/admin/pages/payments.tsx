@@ -1,19 +1,24 @@
-import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { Copy, Undo2 } from "lucide-react";
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { api, ApiError, errorText, unwrap, type Schemas } from "../../api/client";
-import { qk } from "../../api/hooks";
+import { Undo2 } from "lucide-react";
+import { useState, type FormEvent, type ReactNode } from "react";
+import { api, errorText, unwrap, type Schemas } from "../../api/client";
+import { qk, usePaymentSettings } from "../../api/hooks";
 import { Confirm } from "../../components/overlay";
 import { useToast } from "../../components/toast";
-import { Button, EmptyState, ErrorState, Field, PageHeader, Pill, Skeleton, Switch } from "../../components/ui";
-import { t } from "../../i18n";
+import { QueryBoundary, StaleNotice } from "../../components/query";
+import { Switch } from "../../components/switch";
+import { Button, EmptyState, ErrorState, PageHeader, Pill, Skeleton, Spinner } from "../../components/ui";
+import { t, tMaybe } from "../../i18n";
+import { useDraft } from "../../lib/draft";
 import { dateShort, money, num, time } from "../../lib/format";
+import { AddonsCard, addonName, useAddons } from "./payment-addons";
 
 type Settings = Schemas["PaymentSettingsView"];
 type Payment = Schemas["PaymentView"];
 type Status = Payment["status"];
 type Provider = Payment["provider"];
+type Addons = Schemas["AddonsView"];
 
 const STATUS_TONE: Record<Status, "ok" | "warn" | "bad" | "off"> = {
   applied: "ok",
@@ -24,26 +29,64 @@ const STATUS_TONE: Record<Status, "ok" | "warn" | "bad" | "off"> = {
   refunded: "bad",
 };
 const STATUSES: Status[] = ["applied", "paid", "pending", "failed", "expired", "refunded"];
-const PROVIDERS: Provider[] = ["stars", "yookassa", "cryptobot"];
+const BUILT_IN: Provider[] = ["stars"];
+
+/** Why a payment failed or waits, in words when the code is known; a provider's own code as is. */
+function paymentError(code: string): string {
+  return tMaybe(`errors.api.${code}`) ?? code;
+}
+
+/** A payment's provider as the admin knows it; adapters by their own name. */
+function providerName(p: Provider, addons: Addons | undefined): string {
+  return p.startsWith("addon:") ? addonName(p.slice("addon:".length), addons) : t(`payments.providers.${p}` as "payments.providers.stars");
+}
 
 export function PaymentsPage() {
-  const settings = useQuery({ queryKey: qk.paymentSettings, queryFn: () => unwrap(api.GET("/api/v1/payments/settings")) });
+  const settings = usePaymentSettings();
+  const qc = useQueryClient();
+  const toast = useToast();
+  const sell = useMutation({
+    mutationFn: () => unwrap(api.PATCH("/api/v1/payments/settings", { body: { enabled: true } })),
+    onSuccess: (v) => {
+      qc.setQueryData(qk.paymentSettings, v);
+      toast.ok(t("settings.salesOnToast"));
+    },
+    onError: (e) => toast.error(errorText(e)),
+  });
   return (
     <>
       <PageHeader title={t("payments.title")} sub={t("payments.subtitle")} />
+      {settings.data?.moving.length ? <MovingBanner ids={settings.data.moving} /> : null}
+      {settings.data && !settings.data.enabled ? (
+        <div className="banner warn mb-4 flex-wrap" role="status">
+          <span className="min-w-0 flex-1">{t("payments.salesOff")}</span>
+          <Button size="sm" variant="primary" loading={sell.isPending} onClick={() => sell.mutate()}>
+            {t("payments.sellNow")}
+          </Button>
+        </div>
+      ) : null}
       <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_420px]">
         <History />
-        {settings.isPending ? (
-          <Skeleton style={{ height: 420, borderRadius: 20 }} />
-        ) : settings.isError ? (
-          <section className="card glass">
-            <ErrorState text={errorText(settings.error)} onRetry={() => void settings.refetch()} />
-          </section>
-        ) : (
-          <SettingsCard s={settings.data} />
-        )}
+        <div className="flex min-w-0 flex-col gap-4">
+          <QueryBoundary query={settings} pending={<Skeleton style={{ height: 420, borderRadius: 20 }} />} wrap={(state) => <section className="card glass">{state}</section>}>
+            {(s) => <SettingsCard s={s} />}
+          </QueryBoundary>
+          <AddonsCard selling={!!settings.data?.enabled} />
+        </div>
       </div>
     </>
+  );
+}
+
+/** The built-in YooKassa and CryptoBot moved to the marketplace: their adapters install after the update. */
+function MovingBanner({ ids }: { ids: string[] }) {
+  const addons = useAddons().data;
+  const names = ids.map((id) => addonName(id, addons)).join(", ");
+  return (
+    <div className="banner info mb-4" role="status">
+      <Spinner />
+      <span className="min-w-0 flex-1">{t("payments.moving", { names })}</span>
+    </div>
   );
 }
 
@@ -53,6 +96,8 @@ function History() {
   const [status, setStatus] = useState<Status | "">("");
   const [provider, setProvider] = useState<Provider | "">("");
   const [refund, setRefund] = useState<Payment | null>(null);
+  const addons = useAddons().data;
+  const providers = [...BUILT_IN, ...(addons?.installed.map((a) => `addon:${a.id}`) ?? [])];
   const list = useInfiniteQuery({
     queryKey: [...qk.payments, status, provider],
     initialPageParam: 0,
@@ -93,20 +138,21 @@ function History() {
         </select>
         <select className="input max-w-[200px]" value={provider} onChange={(e) => setProvider(e.target.value as Provider | "")} aria-label={t("payments.provider")}>
           <option value="">{t("payments.allProviders")}</option>
-          {PROVIDERS.map((p) => (
+          {providers.map((p) => (
             <option key={p} value={p}>
-              {t(`payments.providers.${p}`)}
+              {providerName(p, addons)}
             </option>
           ))}
         </select>
       </div>
+      {list.isError && list.data ? <StaleNotice onRetry={() => void list.refetch()} retrying={list.isFetching} /> : null}
       {list.isPending ? (
         <div className="flex flex-col gap-2">
           {[0, 1, 2, 3].map((i) => (
             <Skeleton key={i} style={{ height: 56 }} />
           ))}
         </div>
-      ) : list.isError ? (
+      ) : !list.data ? (
         <ErrorState text={errorText(list.error)} onRetry={() => void list.refetch()} />
       ) : items.length === 0 ? (
         <EmptyState title={t("payments.empty")} text={status || provider ? t("payments.emptyFiltered") : t("payments.emptyText")} search={!!(status || provider)} />
@@ -114,7 +160,7 @@ function History() {
         <>
           <ul className="row-list" aria-busy={list.isFetching}>
             {items.map((p) => (
-              <PaymentRow key={p.id} p={p} onRefund={() => setRefund(p)} />
+              <PaymentRow key={p.id} p={p} provider={providerName(p.provider, addons)} onRefund={() => setRefund(p)} />
             ))}
           </ul>
           {list.hasNextPage ? (
@@ -138,7 +184,7 @@ function History() {
   );
 }
 
-function PaymentRow({ p, onRefund }: { p: Payment; onRefund: () => void }) {
+function PaymentRow({ p, provider, onRefund }: { p: Payment; provider: string; onRefund: () => void }) {
   const buyer = p.tg_username ? `@${p.tg_username}` : `tg ${p.tg_id}`;
   return (
     <li className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 py-3">
@@ -149,7 +195,7 @@ function PaymentRow({ p, onRefund }: { p: Payment; onRefund: () => void }) {
           <Pill tone={STATUS_TONE[p.status]}>{t(`payments.statuses.${p.status}`)}</Pill>
         </div>
         <div className="mt-1 text-xs text-[var(--ink-500)]">
-          {dateShort(p.created_at)} {time(p.created_at)} · {t(`payments.providers.${p.provider}`)} · {p.kind === "new" ? t("payments.kindNew") : t("payments.kindRenew")} · {buyer}
+          {dateShort(p.created_at)} {time(p.created_at)} · {provider} · {p.kind === "new" ? t("payments.kindNew") : p.kind === "package" ? t("payments.kindPackage") : t("payments.kindRenew")} · {buyer}
           {p.user_id != null ? (
             <>
               {" → "}
@@ -159,7 +205,9 @@ function PaymentRow({ p, onRefund }: { p: Payment; onRefund: () => void }) {
             </>
           ) : null}
         </div>
-        {p.error ? <div className="mt-1 text-xs text-[var(--berry-600)]">{t("payments.notApplied", { error: p.error })}</div> : null}
+        {p.error ? (
+          <div className="mt-1 text-xs text-[var(--berry-600)]">{t(p.status === "failed" ? "payments.invoiceFailed" : "payments.notApplied", { error: paymentError(p.error) })}</div>
+        ) : null}
       </div>
       {p.provider === "stars" && p.status === "applied" ? (
         <Button size="sm" variant="ghost" onClick={onRefund}>
@@ -173,36 +221,19 @@ function PaymentRow({ p, onRefund }: { p: Payment; onRefund: () => void }) {
 function SettingsCard({ s }: { s: Settings }) {
   const qc = useQueryClient();
   const toast = useToast();
-  const init = () => ({ stars: s.stars, yookassa: s.yookassa, shop: s.yookassa_shop_id, cryptobot: s.cryptobot, testnet: s.cryptobot_testnet, allowNew: s.allow_new, resetTraffic: s.renew_resets_traffic });
-  const [form, setForm] = useState(init);
-  const [ykSecret, setYkSecret] = useState("");
-  const [cbToken, setCbToken] = useState("");
-  useEffect(() => setForm(init()), [s]);
+  const { draft: form, setDraft: setForm } = useDraft({ stars: s.stars, allowNew: s.allow_new, resetTraffic: s.renew_resets_traffic });
   const save = useMutation({
     mutationFn: (body: Schemas["PatchPaymentSettingsInputBody"]) => unwrap(api.PATCH("/api/v1/payments/settings", { body })),
     onSuccess: (v) => {
       qc.setQueryData(qk.paymentSettings, v);
-      setYkSecret("");
-      setCbToken("");
       toast.ok(t("payments.saved"));
     },
   });
-  const errors = save.error instanceof ApiError ? save.error.fields : {};
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    save.mutate({
-      stars: form.stars,
-      yookassa: form.yookassa,
-      yookassa_shop_id: form.shop.trim(),
-      cryptobot: form.cryptobot,
-      cryptobot_testnet: form.testnet,
-      allow_new: form.allowNew,
-      renew_resets_traffic: form.resetTraffic,
-      ...(ykSecret.trim() ? { yookassa_secret: ykSecret.trim() } : {}),
-      ...(cbToken.trim() ? { cryptobot_token: cbToken.trim() } : {}),
-    });
+    save.mutate({ stars: form.stars, allow_new: form.allowNew, renew_resets_traffic: form.resetTraffic });
   };
-  const set = (k: keyof ReturnType<typeof init>) => (v: boolean) => setForm((f) => ({ ...f, [k]: v }));
+  const set = (k: keyof typeof form) => (v: boolean) => setForm((f) => ({ ...f, [k]: v }));
   return (
     <section className="card glass reveal" style={{ "--i": 1 } as React.CSSProperties}>
       <form onSubmit={submit} noValidate>
@@ -212,49 +243,18 @@ function SettingsCard({ s }: { s: Settings }) {
             <div className="card-sub">{t("payments.settingsSub")}</div>
           </div>
         </div>
-        {save.error && !Object.keys(errors).length ? <div className="banner err mb-4">{errorText(save.error)}</div> : null}
-
-        <Provider title={t("payments.providers.stars")} sub={t("payments.starsSub")} on={form.stars} onChange={set("stars")} live={s.available.stars} offline={form.stars && !s.available.stars ? t("payments.starsBotOff") : ""} />
-
-        <Provider title={t("payments.providers.yookassa")} sub={t("payments.yookassaSub")} on={form.yookassa} onChange={set("yookassa")} live={s.available.yookassa} error={errors.yookassa}>
-          <div className="grid gap-x-3 sm:grid-cols-2">
-            <Field label={t("payments.shopId")} htmlFor="p-shop" error={errors.yookassa_shop_id}>
-              <input id="p-shop" className="input mono" inputMode="numeric" value={form.shop} onChange={(e) => setForm((f) => ({ ...f, shop: e.target.value }))} autoComplete="off" aria-invalid={!!errors.yookassa_shop_id} />
-            </Field>
-            <Field label={t("payments.secretKey")} htmlFor="p-yk" error={errors.yookassa_secret}>
-              <input
-                id="p-yk"
-                className="input mono"
-                type="password"
-                value={ykSecret}
-                onChange={(e) => setYkSecret(e.target.value)}
-                placeholder={s.yookassa_secret_set ? t("payments.keySaved") : "live_…"}
-                autoComplete="new-password"
-                aria-invalid={!!errors.yookassa_secret}
-              />
-            </Field>
+        {save.error ? <div className="banner err mb-4">{errorText(save.error)}</div> : null}
+        {(s.available.stars || s.available.addons.length > 0) && s.on_sale === 0 ? (
+          <div className="banner warn mb-4 flex-wrap" role="status">
+            <span className="min-w-0 flex-1">{t("payments.nothingOnSale")}</span>
+            <Link to="/tariffs" search={{ tab: "tariffs" }} className="btn btn-glass btn-sm">
+              {t("payments.openTariffs")}
+            </Link>
           </div>
-          <Webhook label={t("payments.webhookYooKassa")} url={s.webhook_yookassa} />
-        </Provider>
+        ) : null}
 
-        <Provider title={t("payments.providers.cryptobot")} sub={t("payments.cryptobotSub")} on={form.cryptobot} onChange={set("cryptobot")} live={s.available.cryptobot} error={errors.cryptobot}>
-          <Field label={t("payments.cryptoToken")} htmlFor="p-cb" error={errors.cryptobot_token}>
-            <input
-              id="p-cb"
-              className="input mono"
-              type="password"
-              value={cbToken}
-              onChange={(e) => setCbToken(e.target.value)}
-              placeholder={s.cryptobot_token_set ? t("payments.keySaved") : "12345:AA…"}
-              autoComplete="new-password"
-              aria-invalid={!!errors.cryptobot_token}
-            />
-          </Field>
-          <label className="mb-3 flex items-center gap-2 text-[13px]">
-            <input type="checkbox" className="check" checked={form.testnet} onChange={(e) => setForm((f) => ({ ...f, testnet: e.target.checked }))} /> {t("payments.testnet")}
-          </label>
-          <Webhook label={t("payments.webhookCryptoBot")} url={s.webhook_cryptobot} />
-        </Provider>
+        <Provider title={t("payments.providers.stars")} sub={t("payments.starsSub")} on={form.stars} onChange={set("stars")} live={s.available.stars} selling={s.enabled} offline={s.enabled && form.stars && !s.available.stars ? t("payments.starsBotOff") : ""} />
+        <p className="mb-4 text-xs text-[var(--ink-500)]">{t("payments.rublesInMarketplace")}</p>
 
         <div className="mb-4 flex items-start justify-between gap-3 border-t border-[var(--hairline)] pt-4">
           <div>
@@ -278,14 +278,15 @@ function SettingsCard({ s }: { s: Settings }) {
   );
 }
 
-function Provider({ title, sub, on, onChange, live, offline, error, children }: { title: string; sub: string; on: boolean; onChange: (v: boolean) => void; live: boolean; offline?: string; error?: string; children?: ReactNode }) {
+// With selling off nothing takes payments: the readiness pill would only mislead, so it hides.
+function Provider({ title, sub, on, onChange, live, selling, offline, error, children }: { title: string; sub: string; on: boolean; onChange: (v: boolean) => void; live: boolean; selling: boolean; offline?: string; error?: string; children?: ReactNode }) {
   return (
     <div className="mb-4 border-t border-[var(--hairline)] pt-4 first-of-type:border-t-0 first-of-type:pt-0" role="group" aria-label={title}>
       <div className="mb-3 flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2 text-[13px] font-semibold">
             {title}
-            {on ? <Pill tone={live ? "ok" : "warn"}>{live ? t("payments.live") : t("payments.notReady")}</Pill> : null}
+            {on && selling ? <Pill tone={live ? "ok" : "warn"}>{live ? t("payments.live") : t("payments.notReady")}</Pill> : null}
           </div>
           <div className="text-xs text-[var(--ink-500)]">{sub}</div>
           {offline ? <div className="mt-1 text-xs text-[var(--honey-600)]">{offline}</div> : null}
@@ -298,30 +299,6 @@ function Provider({ title, sub, on, onChange, live, offline, error, children }: 
         <Switch checked={on} onChange={onChange} label={title} />
       </div>
       {on ? children : null}
-    </div>
-  );
-}
-
-function Webhook({ label, url }: { label: string; url: string }) {
-  const toast = useToast();
-  if (!url) return <p className="text-xs text-[var(--ink-500)]">{t("payments.webhookNoHost")}</p>;
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(url);
-      toast.ok(t("payments.webhookCopied"));
-    } catch {
-      toast.error(t("common.copyFailed"));
-    }
-  };
-  return (
-    <div>
-      <div className="mb-1 text-xs text-[var(--ink-500)]">{label}</div>
-      <div className="link-field">
-        <span className="mono">{url}</span>
-        <button type="button" className="icon-btn" onClick={() => void copy()} aria-label={t("payments.copyWebhook")}>
-          <Copy size={18} />
-        </button>
-      </div>
     </div>
   );
 }

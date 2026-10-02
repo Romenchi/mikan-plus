@@ -60,10 +60,39 @@ pub fn open(rules: &[String]) -> Result<bool> {
     Ok(true)
 }
 
+/// Whether a rule is a port or a range of ports over tcp or udp, like 8443/tcp or
+/// 20000:20010/udp: all `ufw allow` takes from here, so that nothing a container printed
+/// can become an option or another command.
+pub fn valid_rule(rule: &str) -> bool {
+    let Some((ports, proto)) = rule.split_once('/') else { return false };
+    if proto != "tcp" && proto != "udp" {
+        return false;
+    }
+    let port = |p: &str| p.len() <= 5 && p.bytes().all(|b| b.is_ascii_digit()) && p.parse::<u32>().is_ok_and(|n| (1..=65535).contains(&n));
+    match ports.split_once(':') {
+        Some((a, b)) => port(a) && port(b) && a.parse::<u32>().unwrap_or(0) <= b.parse::<u32>().unwrap_or(0),
+        None => port(ports),
+    }
+}
+
 pub fn allow(rule: &str) -> Result<()> {
-    let ok = Command::new("ufw").args(["allow", rule]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+    if !valid_rule(rule) {
+        bail!("{rule:?} is not a firewall rule like 8443/tcp");
+    }
+    ufw(&["allow", rule])
+}
+
+/// A node's API port for its panel's address only.
+pub fn allow_from(ip: std::net::IpAddr, port: u16) -> Result<()> {
+    let ip = ip.to_string();
+    let port = port.to_string();
+    ufw(&["allow", "from", &ip, "to", "any", "port", &port, "proto", "tcp"])
+}
+
+fn ufw(args: &[&str]) -> Result<()> {
+    let ok = Command::new("ufw").args(args).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
     if !ok {
-        bail!("ufw allow {rule} failed");
+        bail!("ufw {} failed", args.join(" "));
     }
     Ok(())
 }
@@ -76,16 +105,61 @@ pub fn install_self() -> Result<()> {
     if fs::canonicalize(&me).ok() == fs::canonicalize(BIN).ok() {
         return Ok(());
     }
-    replace_bin(&fs::read(&me)?)
+    replace_bin(&fs::read(&me)?, None)
 }
 
-/// Replaces /usr/local/bin/mikan at once; the running process keeps its old copy.
-pub fn replace_bin(data: &[u8]) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let tmp = format!("{BIN}.new");
-    fs::write(&tmp, data)?;
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755))?;
-    fs::rename(&tmp, BIN).with_context(|| format!("replace {BIN}"))
+/// Replaces /usr/local/bin/mikan at once; the running process keeps its old copy. The new
+/// file is on the disk, not only in the page cache (a power cut must not leave the command,
+/// which both update units run, empty), and it runs and reports the release it is meant to
+/// be before it takes the working one's place.
+pub fn replace_bin(data: &[u8], release: Option<&str>) -> Result<()> {
+    replace_at(Path::new(BIN), data, release)
+}
+
+fn replace_at(bin: &Path, data: &[u8], release: Option<&str>) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut tmp = bin.as_os_str().to_owned();
+    tmp.push(".new");
+    let tmp = std::path::PathBuf::from(tmp);
+    let _ = fs::remove_file(&tmp);
+    let mut f =
+        fs::OpenOptions::new().write(true).create_new(true).mode(0o755).open(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+    let checked = f.write_all(data).and_then(|()| f.sync_all()).map_err(anyhow::Error::from).and_then(|()| {
+        drop(f);
+        let out = version_of(&tmp)?;
+        match release {
+            Some(v) if !out.contains(v) => bail!("the downloaded command is {:?}, not release {v}", out.trim()),
+            _ => Ok(()),
+        }
+    });
+    if let Err(e) = checked {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    fs::rename(&tmp, bin).with_context(|| format!("replace {}", bin.display()))?;
+    if let Some(dir) = bin.parent().and_then(|d| fs::File::open(d).ok()) {
+        let _ = dir.sync_all();
+    }
+    Ok(())
+}
+
+/// What the command at path says to --version; it must run and succeed.
+fn version_of(path: &Path) -> Result<String> {
+    let mut last = None;
+    for _ in 0..5 {
+        match Command::new(path).arg("--version").stdin(Stdio::null()).output() {
+            Ok(o) if o.status.success() => return Ok(String::from_utf8_lossy(&o.stdout).into_owned()),
+            Ok(o) => bail!("the downloaded command does not run ({})", o.status),
+            // A file only just written can still be busy for a moment when another thread forked.
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                last = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => return Err(e).context("run the downloaded command"),
+        }
+    }
+    Err(last.map_or_else(|| anyhow::anyhow!("the downloaded command does not run"), Into::into))
 }
 
 const UNITS: [(&str, &str); 4] = [
@@ -98,6 +172,9 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+# A oneshot unit has no time limit by default: an update stuck on a dead connection
+# would keep the timer from ever starting it again.
+TimeoutStartSec=45min
 ExecStart=/usr/local/bin/mikan update --auto
 ",
     ),
@@ -123,6 +200,7 @@ After=docker.service
 
 [Service]
 Type=oneshot
+TimeoutStartSec=45min
 ExecStart=/usr/local/bin/mikan update --requested
 ",
     ),
@@ -140,6 +218,12 @@ WantedBy=paths.target
 ",
     ),
 ];
+
+/// Whether the unit files on disk are the ones this installer writes (a server updated by
+/// an older command has the older ones).
+pub fn units_current() -> bool {
+    UNITS.iter().all(|(name, text)| fs::read_to_string(format!("/etc/systemd/system/{name}")).is_ok_and(|have| have == *text))
+}
 
 /// The update timer, and for a panel the watch on its update button.
 pub fn install_units(panel: bool) -> Result<()> {
@@ -177,15 +261,91 @@ fn systemctl(args: &[&str]) -> Result<()> {
 mod tests {
     use super::*;
 
-    // The panel moves a blocked inbound to a port of this pool; the installer must have
-    // opened them all.
+    // The panel moves a blocked inbound and puts a cascade relay on a port of this pool;
+    // the installer must have opened them all.
     #[test]
     fn pool_matches_the_panel() {
-        let go = fs::read_to_string("../internal/panel/autotune/detect.go").unwrap();
-        let start = go.find("var Pool = []int{").expect("autotune.Pool") + "var Pool = []int{".len();
+        let go = fs::read_to_string("../internal/panel/domain/ports.go").unwrap();
+        let start = go.find("var PortPool = []int{").expect("domain.PortPool") + "var PortPool = []int{".len();
         let list = &go[start..start + go[start..].find('}').unwrap()];
         let pool: Vec<u16> = list.split(',').map(|p| p.trim().parse().unwrap()).collect();
         assert_eq!(pool, POOL);
+    }
+
+    // What a container prints is not a command: only a port (range) and a protocol pass.
+    #[test]
+    fn only_port_rules_reach_ufw() {
+        for ok in ["443/tcp", "8443/udp", "20000:20010/tcp", "1/tcp", "65535/udp"] {
+            assert!(valid_rule(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "443",
+            "443/icmp",
+            "0/tcp",
+            "65536/tcp",
+            "99999/tcp",
+            "-1/tcp",
+            "443/tcp;ls",
+            "443/tcp --force",
+            "--help/tcp",
+            "443:/tcp",
+            ":443/tcp",
+            "20010:20000/tcp",
+            "4 43/tcp",
+            "443/TCP",
+            "443/tcp\n",
+            "1e3/tcp",
+            "+443/tcp",
+            "443/tcp/udp",
+        ] {
+            assert!(!valid_rule(bad), "{bad:?}");
+        }
+        assert!(allow("--help").is_err());
+    }
+
+    fn tmpdir(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("host-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    // The command is replaced only by a file that runs and is the release meant: a
+    // truncated or wrong download leaves the working one.
+    #[test]
+    fn the_command_is_replaced_only_by_a_working_release() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tmpdir("bin");
+        let bin = d.join("mikan");
+        fs::write(&bin, "#!/bin/sh\necho mikan 0.4.3\n").unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        let old = fs::read(&bin).unwrap();
+        let new = b"#!/bin/sh\necho mikan 0.4.4\n";
+        for (what, data, release) in [
+            ("wrong release", &new[..], Some("0.4.5")),
+            ("does not run", &b"#!/bin/sh\nexit 3\n"[..], None),
+            ("truncated", &new[..8], Some("0.4.4")),
+            ("empty", &b""[..], None),
+        ] {
+            assert!(replace_at(&bin, data, release).is_err(), "{what} replaced the command");
+            assert_eq!(fs::read(&bin).unwrap(), old, "{what}");
+            assert!(!d.join("mikan.new").exists(), "{what} left its file");
+        }
+        replace_at(&bin, new, Some("0.4.4")).unwrap();
+        assert_eq!(fs::read(&bin).unwrap(), new);
+        assert_eq!(fs::metadata(&bin).unwrap().permissions().mode() & 0o777, 0o755);
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    // A oneshot unit has no time limit unless it is given one.
+    #[test]
+    fn update_units_have_a_time_limit() {
+        for (name, text) in UNITS {
+            if name.ends_with(".service") {
+                assert!(text.contains("TimeoutStartSec="), "{name}");
+            }
+        }
     }
 
     #[test]

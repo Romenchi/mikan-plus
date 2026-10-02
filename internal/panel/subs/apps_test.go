@@ -108,3 +108,32 @@ func TestForApp(t *testing.T) {
 		}
 	}
 }
+
+// Gecko goes only to mihomo apps that name a core of 1.19.26 or later: an older core
+// fails the whole profile on it, and the other cores got it too late to tell apart.
+func TestGeckoOnlyForNewMihomo(t *testing.T) {
+	g := proto.Needs{Type: "hysteria2", Gecko: true}
+	for ua, want := range map[string]bool{
+		"mihomo/1.19.26":          true,
+		"clash.meta/v1.19.31":     true,
+		"koala-clash/1.4.2":       true,
+		"mihomo/1.19.25":          false,
+		"koala-clash/1.2.0":       false,
+		"clash-verge/v2.4.0":      false, // the core is not named
+		"Happ/3.4.1":              false,
+		"Hiddify/2.5.7":           false,
+		"Karing/1.1":              false,
+		"Stash/3.0":               false,
+		"Shadowrocket/2070 CFNet": false,
+	} {
+		if got := DetectApp(ua).Supports(g); got != want {
+			t.Errorf("%s: %v, want %v", ua, got, want)
+		}
+	}
+	if !DetectApp("Happ/3.4.1").Supports(proto.Needs{Type: "hysteria2"}) {
+		t.Error("plain Hysteria2 must still reach Xray apps")
+	}
+	if fams := AppsFor(g); len(fams) != 1 || fams[0] != FamilyMihomo {
+		t.Errorf("apps for Gecko: %v", fams)
+	}
+}

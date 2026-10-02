@@ -3,6 +3,8 @@ package domain
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -53,17 +55,25 @@ func (p *Pool) Stats(ctx context.Context) (PoolStats, error) {
 func (p *Pool) Refill(ctx context.Context, n int) error {
 	now := p.now().Unix()
 	return p.st.Tx(ctx, func(q *db.Queries) error {
+		// Names go on from the last number ever handed out: the largest id alone gives a
+		// name back once the slots at the top are purged, and the new slot would inherit the
+		// old one's counters on the nodes.
 		last, err := q.MaxSlotID(ctx)
 		if err != nil {
 			return err
 		}
+		given, err := q.SlotCounter(ctx)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		last = max(last, given)
 		for i := 1; i <= n; i++ {
 			err := q.InsertSlot(ctx, db.InsertSlotParams{Name: fmt.Sprintf("s%06d", last+int64(i)), Uuid: newUUID(), Secret: secure.Token(32), CreatedAt: now})
 			if err != nil {
 				return err
 			}
 		}
-		return nil
+		return q.SetSlotCounter(ctx, last+int64(n))
 	})
 }
 

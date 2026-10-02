@@ -71,7 +71,7 @@ func TestTargetsScanAndApply(t *testing.T) {
 	}
 
 	// The site is checked before anything changes.
-	if _, _, err := run("apply", "--all", "--dest", "127.0.0.1:9", "--sni", "www.example.org"); err == nil || !strings.Contains(err.Error(), "does not suit REALITY: connection refused") {
+	if _, _, err := run("apply", "--all", "--dest", "127.0.0.1:9", "--sni", "www.example.org"); err == nil || !strings.Contains(err.Error(), "does not suit REALITY: an internal address") {
 		t.Fatalf("a dead site: %v", err)
 	}
 	out, errOut, err := run("apply", "--all", "--dest", "203.0.113.20:443", "--sni", "www.example.org", "--force")

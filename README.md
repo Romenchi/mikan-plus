@@ -86,8 +86,8 @@ Secret admin link on a random port, HTTPS with Let's Encrypt (even for a bare IP
 <tr>
 <td valign="top">
 
-### 🌐 Cloudflare WARP for chosen protocols
-Each node can have its own WARP — registered in one click or from your WireGuard config. Chosen protocols, domains and networks leave through WARP, everything else goes direct.
+### 🌐 WARP and server cascades
+Each node can have its own WARP — registered in one click or from your WireGuard config — and protocols can leave through another node of the panel (client → node A → node B → internet). Chosen protocols, domains and networks take those ways out, everything else goes direct.
 
 </td>
 <td valign="top">

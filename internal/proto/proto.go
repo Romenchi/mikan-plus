@@ -89,16 +89,6 @@ var rules = map[string]rule{
 // route around the node's REJECT rules or read files on the server.
 var managed = []string{"name", "port", "listen", "users", "certificate", "private-key"}
 
-// Types lists the supported listener types.
-func Types() []string {
-	out := make([]string, 0, len(rules))
-	for k := range rules {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
-
 // Parse reads a YAML (or JSON) template.
 func Parse(src string) (Template, error) {
 	var t Template
@@ -151,6 +141,31 @@ func normalize(v any) any {
 		for i, e := range x {
 			x[i] = normalize(e)
 		}
+	}
+	return v
+}
+
+// Clone is a deep copy: the maps and lists of a template are its own.
+func (t Template) Clone() Template {
+	return Template(deepCopy(map[string]any(t)).(map[string]any))
+}
+
+func deepCopy(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		m := make(map[string]any, len(x))
+		for k, e := range x {
+			m[k] = deepCopy(e)
+		}
+		return m
+	case []any:
+		l := make([]any, len(x))
+		for i, e := range x {
+			l[i] = deepCopy(e)
+		}
+		return l
+	case []string:
+		return append([]string(nil), x...)
 	}
 	return v
 }
@@ -255,8 +270,8 @@ func Validate(t Template, o Options) error {
 		}
 	}
 	if typ == "hysteria2" {
-		if obfs := t.str("obfs"); obfs != "" && (obfs != "salamander" || t.str("obfs-password") == "") {
-			return fail("config_obfs", "obfs")
+		if err := validateObfs(t); err != nil {
+			return err
 		}
 	}
 	if _, set := t["decryption"]; set {
@@ -328,4 +343,74 @@ func Marshal(t Template) string {
 func (t Template) JSON() json.RawMessage {
 	b, _ := json.Marshal(t)
 	return b
+}
+
+// Hysteria2 obfuscation: Salamander scrambles every packet; Gecko (mihomo 1.19.26+) also
+// cuts QUIC handshake packets into padded fragments of random size, against DPI that
+// matches on packet sizes.
+const (
+	ObfsSalamander = "salamander"
+	ObfsGecko      = "gecko"
+	// Gecko's packet sizes on the wire; its own limit for one fragment is 2048 bytes.
+	GeckoMinSize = 256
+	GeckoMaxSize = 2048
+)
+
+func validateObfs(t Template) error {
+	obfs := t.str("obfs")
+	_, minSet := t["obfs-min-packet-size"]
+	_, maxSet := t["obfs-max-packet-size"]
+	switch {
+	case obfs == "" && t["obfs"] == nil:
+		if minSet || maxSet {
+			return fail("config_obfs", "obfs")
+		}
+		return nil
+	case obfs != ObfsSalamander && obfs != ObfsGecko, t.str("obfs-password") == "":
+		return fail("config_obfs", "obfs")
+	case obfs == ObfsSalamander && (minSet || maxSet):
+		return fail("config_obfs_sizes", "obfs-min-packet-size")
+	}
+	lo, hi := 512, 1200 // Gecko's defaults
+	for key, dst := range map[string]*int{"obfs-min-packet-size": &lo, "obfs-max-packet-size": &hi} {
+		raw, set := t[key]
+		if !set {
+			continue
+		}
+		n, ok := toInt(raw)
+		if !ok || n < GeckoMinSize || n > GeckoMaxSize {
+			return fail("config_obfs_sizes", key)
+		}
+		*dst = n
+	}
+	if lo > hi {
+		return fail("config_obfs_sizes", "obfs-min-packet-size")
+	}
+	return nil
+}
+
+// Obfs is a Hysteria2 template's obfuscation, "" without one.
+func Obfs(t Template) string {
+	if t.Type() != "hysteria2" {
+		return ""
+	}
+	return t.str("obfs")
+}
+
+// SetObfs switches a Hysteria2 template to Salamander or Gecko. The password stays (the
+// two share it); password fills one in when the template has none. Gecko's packet sizes
+// go away with Gecko.
+func SetObfs(t Template, obfs, password string) error {
+	if t.Type() != "hysteria2" || (obfs != ObfsSalamander && obfs != ObfsGecko) {
+		return fail("config_obfs", "obfs")
+	}
+	t["obfs"] = obfs
+	if t.str("obfs-password") == "" {
+		t["obfs-password"] = password
+	}
+	if obfs != ObfsGecko {
+		delete(t, "obfs-min-packet-size")
+		delete(t, "obfs-max-packet-size")
+	}
+	return validateObfs(t)
 }

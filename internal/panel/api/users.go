@@ -11,6 +11,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 
+	"mikan/internal/nodeapi"
 	"mikan/internal/panel/domain"
 	"mikan/internal/panel/store/db"
 )
@@ -32,6 +33,7 @@ type UserView struct {
 	State         string        `json:"state" enum:"active,expiring,limited,expired,disabled"`
 	TariffID      *int64        `json:"tariff_id"`
 	TrafficLimit  *int64        `json:"traffic_limit" doc:"Байты за период; null — без лимита"`
+	TrafficExtra  int64         `json:"traffic_extra" doc:"Байты, оставшиеся в пакетах трафика основного лимита: тратятся после лимита тарифа"`
 	UsedUp        int64         `json:"used_up"`
 	UsedDown      int64         `json:"used_down"`
 	TotalUp       int64         `json:"total_up"`
@@ -64,12 +66,38 @@ func ptrTime(v int64, ok bool) *time.Time {
 	return &t
 }
 
-func (h *handlers) viewUser(ctx context.Context, u db.User, slots map[int64][]string) UserView {
+// userEnv is what every user of one response shares, read once for the whole response: a
+// list of 500 users asked for the subscription address (six settings) and the online map
+// (every slot of every node) 500 times each.
+type userEnv struct {
+	subBase string // "": no address yet, or the caller may not see links
+	online  map[string]nodeapi.Online
+}
+
+func (h *handlers) userEnv(ctx context.Context) userEnv {
+	var e userEnv
+	// A subscription link is the user's credential: a read-only key does not get it.
+	if h.d.SubBase != nil && !hidesSecrets(ctx) {
+		e.subBase = h.d.SubBase(ctx)
+	}
+	e.online = h.online()
+	return e
+}
+
+// online is who is online by slot name: nobody when the panel runs without nodes.
+func (h *handlers) online() map[string]nodeapi.Online {
+	if h.d.Online == nil {
+		return nil
+	}
+	return h.d.Online()
+}
+
+func (h *handlers) viewUser(u db.User, slots []string, grants domain.GrantsLeft, env userEnv) UserView {
 	now := h.d.Now()
 	v := UserView{
 		ID: u.ID, Name: u.Name, Contact: u.Contact, Note: u.Note, Tags: domain.DecodeTags(u.Tags),
-		State: domain.State(u, now), TariffID: ptrInt(u.TariffID.Int64, u.TariffID.Valid),
-		TrafficLimit: ptrInt(u.TrafficLimit.Int64, u.TrafficLimit.Valid), UsedUp: u.UsedUp, UsedDown: u.UsedDown,
+		State: domain.State(u, grants.Main(u.ID), now), TariffID: ptrInt(u.TariffID.Int64, u.TariffID.Valid),
+		TrafficLimit: ptrInt(u.TrafficLimit.Int64, u.TrafficLimit.Valid), TrafficExtra: grants.Main(u.ID), UsedUp: u.UsedUp, UsedDown: u.UsedDown,
 		TotalUp: u.TotalUp, TotalDown: u.TotalDown, DeviceLimit: ptrInt(u.DeviceLimit.Int64, u.DeviceLimit.Valid),
 		ResetStrategy: u.ResetStrategy, ExpiresAt: ptrTime(u.ExpiresAt.Int64, u.ExpiresAt.Valid),
 		BillingDay: ptrInt(u.BillingDay.Int64, u.BillingDay.Valid),
@@ -82,23 +110,19 @@ func (h *handlers) viewUser(ctx context.Context, u db.User, slots map[int64][]st
 	if t, ok := domain.NextReset(u, now); ok {
 		v.ResetsAt = &t
 	}
-	if h.d.SubURL != nil {
-		v.SubURL = h.d.SubURL(ctx, u.SubToken)
+	if env.subBase != "" {
+		v.SubURL = env.subBase + "/" + u.SubToken
 	}
-	v.OnlineIPs = h.liveIPs(slots[u.ID])
+	v.OnlineIPs = env.liveIPs(slots)
 	v.Online = len(v.OnlineIPs) > 0
 	return v
 }
 
 // liveIPs merges the online devices of a user's slots: the own one and bound devices'.
-func (h *handlers) liveIPs(slots []string) []string {
+func (e userEnv) liveIPs(slots []string) []string {
 	out := []string{}
-	if h.d.Online == nil {
-		return out
-	}
-	online := h.d.Online()
 	for _, s := range slots {
-		for _, ip := range online[s].IPs {
+		for _, ip := range e.online[s].IPs {
 			if !slices.Contains(out, ip) {
 				out = append(out, ip)
 			}
@@ -108,8 +132,8 @@ func (h *handlers) liveIPs(slots []string) []string {
 	return out
 }
 
-// userSlots maps users to the names of all their slots.
-func (h *handlers) userSlots(ctx context.Context) (map[int64][]string, error) {
+// allUserSlots maps every user to the names of all their slots: for a list.
+func (h *handlers) allUserSlots(ctx context.Context) (map[int64][]string, error) {
 	rows, err := h.d.Store.Q.ListSlotUsers(ctx)
 	if err != nil {
 		return nil, err
@@ -222,7 +246,6 @@ type trafficOutput struct {
 
 type DeviceView struct {
 	IP        string    `json:"ip"`
-	Client    string    `json:"client"`
 	FirstSeen time.Time `json:"first_seen"`
 	LastSeen  time.Time `json:"last_seen"`
 	Online    bool      `json:"online"`
@@ -256,6 +279,10 @@ func mapDomainErr(err error) error {
 	case errors.Is(err, domain.ErrBadBillingDay):
 		return huma.Error422UnprocessableEntity("bad_billing_day", &huma.ErrorDetail{Location: "body.billing_day", Message: "bad_billing_day"})
 	}
+	var fe *domain.FieldError
+	if errors.As(err, &fe) {
+		return huma.Error422UnprocessableEntity("validation", &huma.ErrorDetail{Location: "body." + fe.Field, Message: fe.Code})
+	}
 	return err
 }
 
@@ -264,16 +291,20 @@ func (h *handlers) listUsers(ctx context.Context, in *listUsersInput) (*listUser
 	if err != nil {
 		return nil, err
 	}
-	names, err := h.userSlots(ctx)
+	names, err := h.allUserSlots(ctx)
 	if err != nil {
 		return nil, err
 	}
 	now := h.d.Now()
+	grants, err := domain.LoadGrantsLeft(ctx, h.d.Store.Q, now)
+	if err != nil {
+		return nil, err
+	}
 	q := strings.ToLower(strings.TrimSpace(in.Query))
 	out := &listUsersOutput{}
 	var matched []db.User
 	for _, u := range users {
-		st := domain.State(u, now)
+		st := domain.State(u, grants.Main(u.ID), now)
 		c := &out.Body.Counts
 		c.All++
 		switch st {
@@ -301,8 +332,9 @@ func (h *handlers) listUsers(ctx context.Context, in *listUsersInput) (*listUser
 	end := min(in.Offset+in.Limit, len(matched))
 	out.Body.Items = []UserView{}
 	if in.Offset < len(matched) {
+		env := h.userEnv(ctx)
 		for _, u := range matched[in.Offset:end] {
-			out.Body.Items = append(out.Body.Items, h.viewUser(ctx, u, names))
+			out.Body.Items = append(out.Body.Items, h.viewUser(u, names[u.ID], grants, env))
 		}
 	}
 	return out, nil
@@ -312,11 +344,15 @@ func (h *handlers) userResult(ctx context.Context, u db.User, err error) (*userO
 	if err != nil {
 		return nil, mapDomainErr(err)
 	}
-	names, err := h.userSlots(ctx)
+	slots, err := h.d.Store.Q.ListUserSlots(ctx, u.ID)
 	if err != nil {
 		return nil, err
 	}
-	return &userOutput{Body: h.viewUser(ctx, u, names)}, nil
+	grants, err := domain.UserGrantsLeft(ctx, h.d.Store.Q, u.ID, h.d.Now())
+	if err != nil {
+		return nil, err
+	}
+	return &userOutput{Body: h.viewUser(u, slots, grants, h.userEnv(ctx))}, nil
 }
 
 func (h *handlers) createUser(ctx context.Context, in *createUserInput) (*userOutput, error) {
@@ -418,18 +454,19 @@ func (h *handlers) boundDevices(ctx context.Context, in *userIDInput) (*boundDev
 	if err != nil {
 		return nil, err
 	}
-	slots, err := h.d.Store.Q.ListSlots(ctx)
+	rows, err := h.d.Store.Q.ListBoundDeviceSlots(ctx, in.ID)
 	if err != nil {
 		return nil, err
 	}
-	name := make(map[int64]string, len(slots))
-	for _, s := range slots {
-		name[s.ID] = s.Name
+	name := make(map[int64]string, len(rows))
+	for _, r := range rows {
+		name[r.DeviceID] = r.SlotName
 	}
+	env := userEnv{online: h.online()}
 	out := &boundDevicesOutput{Body: []BoundDeviceView{}}
 	for _, d := range devs {
 		out.Body = append(out.Body, BoundDeviceView{ID: d.ID, HWID: d.Hwid, OS: d.Os, OSVersion: d.OsVersion, Model: d.Model, App: d.App, LastIP: d.LastIp,
-			Online: len(h.liveIPs([]string{name[d.SlotID]})) > 0, CreatedAt: time.Unix(d.CreatedAt, 0).UTC(), LastSeen: time.Unix(d.LastSeen, 0).UTC()})
+			Online: len(env.liveIPs([]string{name[d.ID]})) > 0, CreatedAt: time.Unix(d.CreatedAt, 0).UTC(), LastSeen: time.Unix(d.LastSeen, 0).UTC()})
 	}
 	return out, nil
 }
@@ -459,37 +496,21 @@ func (h *handlers) reissueUser(ctx context.Context, in *userIDInput) (*userOutpu
 }
 
 func (h *handlers) bulkUsers(ctx context.Context, in *bulkInput) (*bulkOutput, error) {
-	out := &bulkOutput{}
-	for _, id := range in.Body.IDs {
-		var err error
-		switch in.Body.Action {
-		case "extend":
-			if in.Body.Days > 0 {
-				_, err = h.d.Users.Extend(ctx, id, in.Body.Days)
-			} else {
-				_, err = h.d.Users.ExtendPeriod(ctx, id)
-			}
-		case "reset":
-			_, err = h.d.Users.ResetTraffic(ctx, id)
-		case "disable", "enable":
-			v := in.Body.Action == "disable"
-			_, err = h.d.Users.Update(ctx, id, domain.Patch{Disabled: &v})
-		case "delete":
-			err = h.d.Users.Delete(ctx, id)
-		}
-		if errors.Is(err, domain.ErrNotFound) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		out.Body.Affected++
+	// One transaction for the list: it is applied whole or not at all.
+	n, err := h.d.Users.Bulk(ctx, in.Body.IDs, in.Body.Action, in.Body.Days)
+	if err != nil {
+		return nil, mapDomainErr(err)
 	}
-	h.audit(ctx, sessionOf(ctx).AdminID, "user.bulk_"+in.Body.Action, "user", "", map[string]any{"count": out.Body.Affected})
+	out := &bulkOutput{}
+	out.Body.Affected = n
+	h.audit(ctx, sessionOf(ctx).AdminID, "user.bulk_"+in.Body.Action, "user", "", map[string]any{"count": n, "requested": len(in.Body.IDs)})
 	return out, nil
 }
 
 func (h *handlers) userTraffic(ctx context.Context, in *trafficInput) (*trafficOutput, error) {
+	if _, err := h.d.Users.Get(ctx, in.ID); err != nil {
+		return nil, mapDomainErr(err)
+	}
 	now := h.d.Now()
 	out := &trafficOutput{}
 	out.Body.Points = []TrafficPoint{}
@@ -526,14 +547,14 @@ func (h *handlers) userDevices(ctx context.Context, in *userIDInput) (*devicesOu
 	if err != nil {
 		return nil, err
 	}
-	names, err := h.userSlots(ctx)
+	slots, err := h.d.Store.Q.ListUserSlots(ctx, in.ID)
 	if err != nil {
 		return nil, err
 	}
-	live := h.liveIPs(names[in.ID])
+	live := userEnv{online: h.online()}.liveIPs(slots)
 	out := &devicesOutput{Body: []DeviceView{}}
 	for _, d := range rows {
-		out.Body = append(out.Body, DeviceView{IP: d.Ip, Client: d.Client, FirstSeen: time.Unix(d.FirstSeen, 0).UTC(), LastSeen: time.Unix(d.LastSeen, 0).UTC(), Online: slices.Contains(live, d.Ip)})
+		out.Body = append(out.Body, DeviceView{IP: d.Ip, FirstSeen: time.Unix(d.FirstSeen, 0).UTC(), LastSeen: time.Unix(d.LastSeen, 0).UTC(), Online: slices.Contains(live, d.Ip)})
 	}
 	return out, nil
 }

@@ -40,12 +40,17 @@ const Custom = "custom"
 // sing-box based apps cannot speak it and fail on this inbound.
 const PresetPQ = "vless_reality_xhttp_pq"
 
+// PresetGecko is Hysteria2 with Gecko obfuscation (proto.ObfsGecko): only mihomo apps
+// that name a core of 1.19.26 or later get it, the rest go on with plain Hysteria2.
+const PresetGecko = "hysteria2_gecko"
+
 // Order is display and fallback order. Since 2026 the RU DPI freezes a server's 443/tcp
 // after bursts of parallel TLS handshakes; Vision opens one handshake per app connection,
 // so 443/tcp goes to XHTTP, which clients multiplex over a few long-lived connections.
 var All = []Info{
 	{ID: "vless_reality_xhttp", Title: "VLESS · REALITY · XHTTP", Summary: "Основной для РФ: похож на обычный HTTPS, держит мало соединений", Type: "vless", Network: "tcp", Port: "443", Name: "vless-xhttp", SubName: "VLESS XHTTP", Default: true},
 	{ID: "hysteria2", Title: "Hysteria2", Summary: "Быстрый на плохих каналах, работает по UDP", Type: "hysteria2", Network: "udp", Port: "443", Name: "hysteria2", SubName: "Hysteria2", Default: true},
+	{ID: PresetGecko, Title: "Hysteria2 · Gecko", Summary: "Hysteria2, у которого рукопожатие режется на куски случайного размера: против DPI, который узнаёт QUIC по размерам пакетов. Только приложения на ядре mihomo 1.19.26+", Type: "hysteria2", Network: "udp", Port: "2443", Name: "hysteria2-gecko", SubName: "Hysteria2 Gecko", Apps: "mihomo"},
 	{ID: "tuic_v5", Title: "TUIC v5", Summary: "Альтернатива на QUIC, тоже по UDP", Type: "tuic", Network: "udp", Port: "8443", Name: "tuic", SubName: "TUIC", Default: true},
 	{ID: "vless_reality_vision", Title: "VLESS · REALITY · Vision", Summary: "Для старых клиентов без XHTTP. На 443 в РФ быстро замораживается", Type: "vless", Network: "tcp", Port: "8443", Name: "vless-vision", SubName: "VLESS Vision", Default: true},
 	{ID: "vless_reality_grpc", Title: "VLESS · REALITY · gRPC", Summary: "HTTP/2 с мультиплексом: мало соединений, другой рисунок трафика", Type: "vless", Network: "tcp", Port: "2053", Name: "vless-grpc", SubName: "VLESS gRPC"},
@@ -102,7 +107,9 @@ func NewConfig(id, dest string) (string, error) {
 	case "trojan_reality":
 		t = proto.Template{"type": "trojan"}
 	case "hysteria2":
-		return proto.Marshal(proto.Template{"type": "hysteria2", "alpn": []any{"h3"}, "obfs": "salamander", "obfs-password": secure.Token(24)}), nil
+		return proto.Marshal(proto.Template{"type": "hysteria2", "alpn": []any{"h3"}, "obfs": proto.ObfsSalamander, "obfs-password": secure.Token(24)}), nil
+	case PresetGecko:
+		return proto.Marshal(proto.Template{"type": "hysteria2", "alpn": []any{"h3"}, "obfs": proto.ObfsGecko, "obfs-password": secure.Token(24)}), nil
 	case "tuic_v5":
 		return proto.Marshal(proto.Template{"type": "tuic", "alpn": []any{"h3"}, "congestion-controller": "bbr", "max-idle-time": 15000, "authentication-timeout": 1000}), nil
 	case "anytls":

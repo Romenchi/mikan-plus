@@ -19,7 +19,7 @@ SET name = ?, traffic_limit = ?, duration_days = ?, device_limit = ?, reset_stra
 WHERE id = ?
 RETURNING *;
 
--- name: ArchiveTariff :exec
+-- name: ArchiveTariff :execrows
 UPDATE tariffs SET archived = 1 WHERE id = ?;
 
 -- name: CountSlotsByState :many
@@ -30,6 +30,13 @@ INSERT INTO slots (name, uuid, secret, state, created_at) VALUES (?, ?, ?, 'free
 
 -- name: MaxSlotID :one
 SELECT CAST(coalesce(max(id), 0) AS INTEGER) FROM slots;
+
+-- name: SlotCounter :one
+-- The last slot number handed out: slots purged from the top do not give theirs back.
+SELECT last FROM slot_counter WHERE id = 1;
+
+-- name: SetSlotCounter :exec
+INSERT INTO slot_counter (id, last) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET last = excluded.last;
 
 -- name: TakeFreeSlot :one
 UPDATE slots SET state = 'assigned'
@@ -54,6 +61,16 @@ SELECT * FROM slots WHERE id = ?;
 SELECT s.name AS slot_name, u.id AS user_id FROM slots s JOIN users u ON u.slot_id = s.id
 UNION
 SELECT s.name AS slot_name, d.user_id AS user_id FROM slots s JOIN bound_devices d ON d.slot_id = s.id;
+
+-- name: ListUserSlots :many
+-- The same for one user: what an answer about a single user needs, not the whole table.
+SELECT s.name FROM slots s JOIN users u ON u.slot_id = s.id WHERE u.id = sqlc.arg(user_id)
+UNION
+SELECT s.name FROM slots s JOIN bound_devices d ON d.slot_id = s.id WHERE d.user_id = sqlc.arg(user_id);
+
+-- name: ListBoundDeviceSlots :many
+-- The names of the slots of a user's bound devices, by device id.
+SELECT d.id AS device_id, s.name AS slot_name FROM bound_devices d JOIN slots s ON s.id = d.slot_id WHERE d.user_id = ?;
 
 -- name: CreateUser :one
 INSERT INTO users (name, contact, note, tags, status, tariff_id, traffic_limit, device_limit, reset_strategy,
@@ -126,12 +143,12 @@ GROUP BY u.id ORDER BY bytes DESC LIMIT ?;
 -- name: PruneTrafficHourly :exec
 DELETE FROM traffic_hourly WHERE hour < ?;
 
+-- name: PruneTrafficDaily :exec
+DELETE FROM traffic_daily WHERE day < ?;
+
 -- name: UpsertDevice :exec
 INSERT INTO devices (user_id, ip, first_seen, last_seen) VALUES (?, ?, ?, ?)
 ON CONFLICT (user_id, ip) DO UPDATE SET last_seen = excluded.last_seen;
-
--- name: SetDeviceClient :exec
-UPDATE devices SET client = ? WHERE user_id = ? AND ip = ?;
 
 -- name: ListUserDevices :many
 SELECT * FROM devices WHERE user_id = ? ORDER BY last_seen DESC;
@@ -141,6 +158,9 @@ DELETE FROM devices WHERE last_seen < ?;
 
 -- name: ListInbounds :many
 SELECT * FROM inbounds ORDER BY id;
+
+-- name: ListNodeInbounds :many
+SELECT * FROM inbounds WHERE node_id = ? ORDER BY id;
 
 -- name: GetInbound :one
 SELECT * FROM inbounds WHERE id = ?;

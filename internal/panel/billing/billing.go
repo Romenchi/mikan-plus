@@ -1,14 +1,13 @@
-// Package billing sells tariffs: the bot and the Mini App offer the tariffs on sale, a
-// payment through Telegram Stars, YooKassa or CryptoBot creates or renews the buyer's
-// subscription, and the buyer gets the link.
+// Package billing sells tariffs and traffic packages: the bot and the Mini App offer what
+// is on sale, a payment through Telegram Stars or a marketplace adapter (addon.go)
+// creates or renews the buyer's subscription, and the buyer gets the link.
 //
-// A payment row is made before the buyer pays, with an unguessable payload that every
-// provider echoes back. Money is trusted only from the provider itself: Telegram's
-// successful_payment on the bot's own long poll, YooKassa's API asked again with the
-// shop's key (its webhooks are not signed), CryptoBot's HMAC-signed webhook confirmed by
-// its API. The provider's payment id is unique per provider and a payment moves from
-// paid to applied once, on the same transaction that changes the subscription, so a
-// repeated or concurrent notification never pays out twice.
+// A payment row is made before the buyer pays, with an unguessable payload. Money is
+// trusted only from the provider itself: Telegram's successful_payment on the bot's own
+// long poll, or the invoice's status the panel asks the adapter for, compared with the
+// payment it made (a webhook only makes it ask). The provider's payment id is unique per
+// provider and a payment moves from paid to applied once, on the same transaction that
+// changes the subscription, so a repeated or concurrent notification never pays out twice.
 package billing
 
 import (
@@ -17,11 +16,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"mikan/internal/panel/addons"
 	"mikan/internal/panel/domain"
 	"mikan/internal/panel/secure"
 	"mikan/internal/panel/settings"
@@ -29,34 +29,26 @@ import (
 	"mikan/internal/panel/store/db"
 )
 
-// Providers.
+// Stars is Telegram's own currency; every other provider is a marketplace adapter,
+// "addon:<id>".
+const Stars = "stars"
+
+// Settings keys.
 const (
-	Stars     = "stars"
-	YooKassa  = "yookassa"
-	CryptoBot = "cryptobot"
+	KeyConfig       = "pay_config"
+	KeyWebhookToken = "pay_webhook_token" // the secret part of the webhook URLs
+	invoiceReuse    = 10 * time.Minute    // an open invoice for the same purchase is shown again
+	pendingTTL      = 24 * time.Hour      // unpaid invoices expire
+	reconcileEvery  = time.Minute
+	maxPerHour      = 20 // invoices one Telegram account may open in an hour
 )
 
-// Settings keys. The secrets never leave the panel's API.
-const (
-	KeyConfig          = "pay_config"
-	KeyYooKassaSecret  = "pay_yookassa_secret"
-	KeyCryptoBotToken  = "pay_cryptobot_token"
-	KeyWebhookToken    = "pay_webhook_token" // the secret part of the webhook URLs
-	invoiceReuse       = 10 * time.Minute    // an open invoice for the same purchase is shown again
-	pendingTTL         = 24 * time.Hour      // unpaid invoices expire
-	reconcileEvery     = time.Minute
-	maxPerHour         = 20 // invoices one Telegram account may open in an hour
-	cryptoInvoiceTTL   = time.Hour
-	providerHTTPTimout = 15 * time.Second
-)
-
-// Config is what the admin sets; secrets are separate settings.
+// Config is what the admin sets; the adapters' settings are their own (addon.go).
 type Config struct {
-	Stars     bool   `json:"stars"`
-	YooKassa  bool   `json:"yookassa"`
-	ShopID    string `json:"yookassa_shop_id"`
-	CryptoBot bool   `json:"cryptobot"`
-	Testnet   bool   `json:"cryptobot_testnet"`
+	// Enabled is the switch for selling at all: off, the bot and the Mini App offer
+	// nothing and take no new invoices, while invoices already opened are still applied.
+	Enabled bool `json:"enabled"`
+	Stars   bool `json:"stars"`
 	// AllowNew lets people without a subscription buy one; off: only renewals.
 	AllowNew bool `json:"allow_new"`
 	// RenewResetsTraffic: a paid renewal also starts a new traffic period; off, the
@@ -64,7 +56,8 @@ type Config struct {
 	RenewResetsTraffic bool `json:"renew_resets_traffic"`
 }
 
-// DefaultConfig: Stars on (it needs nothing but the bot), new buyers welcome.
+// DefaultConfig: selling off until the admin turns it on; then Stars (it needs nothing but
+// the bot) and new buyers are welcome.
 var DefaultConfig = Config{Stars: true, AllowNew: true, RenewResetsTraffic: true}
 
 // Telegram is the bot's part: Stars invoices and refunds, and telling buyers.
@@ -84,12 +77,14 @@ type Deps struct {
 	Users    *domain.Users
 	Log      *slog.Logger
 	Now      func() time.Time
-	HTTP     *http.Client // nil: a client with a timeout
-	// Provider APIs; empty: the real ones (tests point them at fakes).
-	YooKassaAPI, CryptoBotAPI, CryptoBotTestAPI string
-	// TrustProxy reads the client's IP from X-Forwarded-For (the YooKassa IP check).
+	// TrustProxy reads the client's IP from X-Forwarded-For: adapters check where a
+	// webhook came from (YooKassa's addresses).
 	TrustProxy bool
 	MaxLinks   int64 // subscriptions one Telegram account may hold
+	// Addons are the marketplace's payment adapters; nil: none.
+	Addons *addons.Manager
+	// SubBase is https://host:port/<sub path>, where the webhooks are; "" without an address.
+	SubBase func(ctx context.Context) string
 }
 
 type Service struct {
@@ -99,18 +94,6 @@ type Service struct {
 }
 
 func New(d Deps) *Service {
-	if d.HTTP == nil {
-		d.HTTP = &http.Client{Timeout: providerHTTPTimout}
-	}
-	if d.YooKassaAPI == "" {
-		d.YooKassaAPI = "https://api.yookassa.ru/v3"
-	}
-	if d.CryptoBotAPI == "" {
-		d.CryptoBotAPI = "https://pay.crypt.bot/api"
-	}
-	if d.CryptoBotTestAPI == "" {
-		d.CryptoBotTestAPI = "https://testnet-pay.crypt.bot/api"
-	}
 	if d.MaxLinks == 0 {
 		d.MaxLinks = 5
 	}
@@ -142,39 +125,65 @@ var (
 	ErrNotRefunable = errors.New("not_refundable")
 )
 
+// LoadConfig reads the payment settings. A read error is returned, never replaced by the
+// defaults: settings changed on top of those and saved would switch selling off and
+// forget the providers.
+func (s *Service) LoadConfig(ctx context.Context) (Config, error) {
+	// Payment settings saved before the switch existed (0.4.0, 0.4.1) come from panels that
+	// set up selling: they keep selling. A panel that never saved them starts with it off.
+	saved := DefaultConfig
+	saved.Enabled = true
+	c, found, err := settings.GetOver(ctx, s.d.Settings, KeyConfig, saved)
+	switch {
+	case err != nil:
+		return DefaultConfig, err
+	case !found:
+		return DefaultConfig, nil
+	}
+	return c, nil
+}
+
+// Config is what decides what is on offer. When the settings cannot be read nothing is:
+// selling fails closed until the store answers again.
 func (s *Service) Config(ctx context.Context) Config {
-	c, _, err := settings.GetOver(ctx, s.d.Settings, KeyConfig, DefaultConfig)
+	c, err := s.LoadConfig(ctx)
 	if err != nil {
-		return DefaultConfig
+		s.d.Log.Warn("billing: payment settings unreadable, selling paused", "err", err)
+		c.Enabled = false
 	}
 	return c
 }
 
-// Secrets holds what the providers need besides Config.
-type Secrets struct{ YooKassaSecret, CryptoBotToken string }
-
-func (s *Service) secrets(ctx context.Context) Secrets {
-	var sec Secrets
-	sec.YooKassaSecret, _ = s.d.Settings.String(ctx, KeyYooKassaSecret)
-	sec.CryptoBotToken, _ = s.d.Settings.String(ctx, KeyCryptoBotToken)
-	return sec
-}
-
-// Available says which providers can take a payment right now: on, configured and, for
-// Stars, with the bot running.
+// Available says which providers can take a payment right now: selling on, Stars with
+// the bot running, and the adapters that are on, set up and running.
 type Available struct {
-	Stars, YooKassa, CryptoBot bool
+	Stars bool
+	// Addons are the adapters that take rubles now, by id.
+	Addons []string
 }
 
-func (a Available) Any() bool { return a.Stars || a.YooKassa || a.CryptoBot }
+func (a Available) Any() bool { return a.Stars || a.Rub() }
+
+// Rub: some provider takes rubles.
+func (a Available) Rub() bool { return len(a.Addons) > 0 }
+
+func (a Available) has(provider string) bool {
+	if provider == Stars {
+		return a.Stars
+	}
+	id := AddonID(provider)
+	return id != "" && slices.Contains(a.Addons, id)
+}
 
 func (s *Service) Available(ctx context.Context) Available {
-	c, sec := s.Config(ctx), s.secrets(ctx)
+	c := s.Config(ctx)
+	if !c.Enabled {
+		return Available{}
+	}
 	tg := s.telegram()
 	return Available{
-		Stars:     c.Stars && tg != nil && tg.BotURL(ctx) != "",
-		YooKassa:  c.YooKassa && c.ShopID != "" && sec.YooKassaSecret != "",
-		CryptoBot: c.CryptoBot && sec.CryptoBotToken != "",
+		Stars:  c.Stars && tg != nil && tg.BotURL(ctx) != "",
+		Addons: s.availableAddons(ctx),
 	}
 }
 
@@ -198,12 +207,7 @@ func (s *Service) Offers(ctx context.Context) ([]Offer, Available, error) {
 	var out []Offer
 	for _, t := range ts {
 		o := Offer{Tariff: t}
-		if av.Stars && t.PriceStars.Valid {
-			o.Stars = t.PriceStars.Int64
-		}
-		if (av.YooKassa || av.CryptoBot) && t.PriceRub.Valid {
-			o.Rub = t.PriceRub.Int64
-		}
+		o.Stars, o.Rub = av.prices(t.PriceStars, t.PriceRub)
 		if o.Stars > 0 || o.Rub > 0 {
 			out = append(out, o)
 		}
@@ -230,15 +234,8 @@ func (s *Service) Invoice(ctx context.Context, req InvoiceRequest) (db.Payment, 
 	if err != nil {
 		return db.Payment{}, err
 	}
-	av := s.Available(ctx)
-	var amount int64
-	var currency string
-	switch {
-	case req.Provider == Stars && av.Stars && t.PriceStars.Valid:
-		amount, currency = t.PriceStars.Int64, "XTR"
-	case (req.Provider == YooKassa && av.YooKassa || req.Provider == CryptoBot && av.CryptoBot) && t.PriceRub.Valid:
-		amount, currency = t.PriceRub.Int64, "RUB"
-	default:
+	amount, currency, ok := s.Available(ctx).price(req.Provider, t.PriceStars, t.PriceRub)
+	if !ok {
 		return db.Payment{}, ErrProviderOff
 	}
 	kind := "renew"
@@ -258,7 +255,8 @@ func (s *Service) Invoice(ctx context.Context, req InvoiceRequest) (db.Payment, 
 	}
 	now := s.d.Now()
 	userID := sql.NullInt64{Int64: req.UserID, Valid: req.UserID != 0}
-	if p, err := q.FindOpenPayment(ctx, db.FindOpenPaymentParams{TgID: req.TgID, TariffID: t.ID, Provider: req.Provider, Kind: kind,
+	tariffID := sql.NullInt64{Int64: t.ID, Valid: true}
+	if p, err := q.FindOpenPayment(ctx, db.FindOpenPaymentParams{TgID: req.TgID, TariffID: tariffID, Provider: req.Provider, Kind: kind,
 		UserID: sql.NullInt64{Int64: req.UserID, Valid: true}, Since: now.Add(-invoiceReuse).Unix()}); err == nil && p.Amount == amount {
 		return p, nil
 	}
@@ -268,11 +266,42 @@ func (s *Service) Invoice(ctx context.Context, req InvoiceRequest) (db.Payment, 
 		return db.Payment{}, ErrTooMany
 	}
 	p, err := q.CreatePayment(ctx, db.CreatePaymentParams{Provider: req.Provider, Payload: secure.Token(32), TgID: req.TgID, Kind: kind, UserID: userID,
-		TariffID: t.ID, TariffName: t.Name, Amount: amount, Currency: currency, CreatedAt: now.Unix()})
+		TariffID: tariffID, TariffName: t.Name, Amount: amount, Currency: currency, CreatedAt: now.Unix()})
 	if err != nil {
 		return db.Payment{}, err
 	}
-	ext, url, err := s.openInvoice(ctx, p, t)
+	lang, _ := s.d.Settings.Lang(ctx)
+	return s.openPayment(ctx, p, t.Name, Describe(t, lang))
+}
+
+// prices are the prices of an item the available providers take: 0 where none does.
+func (av Available) prices(stars, rub sql.NullInt64) (inStars, inRub int64) {
+	if av.Stars && stars.Valid {
+		inStars = stars.Int64
+	}
+	if av.Rub() && rub.Valid {
+		inRub = rub.Int64
+	}
+	return inStars, inRub
+}
+
+// price is what a buyer pays with provider for an item with these prices: Stars for
+// Stars, rubles for the others; ok false when the provider cannot take it now.
+func (av Available) price(provider string, stars, rub sql.NullInt64) (amount int64, currency string, ok bool) {
+	switch {
+	case provider == Stars && av.Stars && stars.Valid:
+		return stars.Int64, "XTR", true
+	case provider != Stars && av.has(provider) && rub.Valid:
+		return rub.Int64, "RUB", true
+	}
+	return 0, "", false
+}
+
+// openPayment opens the provider's invoice for a payment just made and returns it with the
+// URL to pay at; a provider that fails marks the payment failed.
+func (s *Service) openPayment(ctx context.Context, p db.Payment, title, desc string) (db.Payment, error) {
+	q := s.d.Store.Q
+	ext, url, err := s.openInvoice(ctx, p, title, desc)
 	if err != nil {
 		_, _ = q.SetPaymentStatus(ctx, db.SetPaymentStatusParams{NewStatus: "failed", ID: p.ID, OldStatus: "pending"})
 		_ = q.SetPaymentError(ctx, db.SetPaymentErrorParams{Error: errCode(err), ID: p.ID})
@@ -286,26 +315,13 @@ func (s *Service) Invoice(ctx context.Context, req InvoiceRequest) (db.Payment, 
 	return p, nil
 }
 
-func (s *Service) recentInvoices(ctx context.Context, tgID int64, now time.Time) (int, error) {
-	open, err := s.d.Store.Q.ListOpenPayments(ctx, now.Add(-time.Hour).Unix())
-	if err != nil {
-		return 0, err
-	}
-	n := 0
-	for _, p := range open {
-		if p.TgID == tgID {
-			n++
-		}
-	}
-	return n, nil
+func (s *Service) recentInvoices(ctx context.Context, tgID int64, now time.Time) (int64, error) {
+	return s.d.Store.Q.CountRecentInvoices(ctx, db.CountRecentInvoicesParams{TgID: tgID, CreatedAt: now.Add(-time.Hour).Unix()})
 }
 
 // openInvoice asks the provider for the invoice: its id (none for Stars until paid) and
 // the URL the buyer pays at.
-func (s *Service) openInvoice(ctx context.Context, p db.Payment, t db.Tariff) (sql.NullString, string, error) {
-	title := t.Name
-	lang, _ := s.d.Settings.Lang(ctx)
-	desc := Describe(t, lang)
+func (s *Service) openInvoice(ctx context.Context, p db.Payment, title, desc string) (sql.NullString, string, error) {
 	switch p.Provider {
 	case Stars:
 		tg := s.telegram()
@@ -314,33 +330,11 @@ func (s *Service) openInvoice(ctx context.Context, p db.Payment, t db.Tariff) (s
 		}
 		url, err := tg.InvoiceLink(ctx, title, desc, p.Payload, p.Amount)
 		return sql.NullString{}, url, err
-	case YooKassa:
-		c, sec := s.Config(ctx), s.secrets(ctx)
-		y := yooKassa{base: s.d.YooKassaAPI, shopID: c.ShopID, secret: sec.YooKassaSecret, hc: s.d.HTTP}
-		ret := ""
-		if tg := s.telegram(); tg != nil {
-			ret = tg.BotURL(ctx)
-		}
-		id, url, err := y.create(ctx, p.Payload, p.Amount, title+" — "+desc, ret)
-		return sql.NullString{String: id, Valid: id != ""}, url, err
-	case CryptoBot:
-		cb := s.cryptoBot(ctx)
-		back := ""
-		if tg := s.telegram(); tg != nil {
-			back = tg.BotURL(ctx)
-		}
-		id, url, err := cb.create(ctx, p.Payload, p.Amount, title+" — "+desc, back)
-		return sql.NullString{String: id, Valid: id != ""}, url, err
+	}
+	if AddonID(p.Provider) != "" {
+		return s.openAddonInvoice(ctx, p, title+" — "+desc)
 	}
 	return sql.NullString{}, "", ErrProviderOff
-}
-
-func (s *Service) cryptoBot(ctx context.Context) cryptoBot {
-	base := s.d.CryptoBotAPI
-	if s.Config(ctx).Testnet {
-		base = s.d.CryptoBotTestAPI
-	}
-	return cryptoBot{base: base, token: s.secrets(ctx).CryptoBotToken, hc: s.d.HTTP}
 }
 
 // Describe is a tariff in a line, "30 days · 100 GB · 3 devices", in lang ("en", else
@@ -376,7 +370,10 @@ func (s *Service) PreCheckout(ctx context.Context, tgID int64, payload, currency
 	if err != nil || p.Provider != Stars || p.Status != "pending" || p.TgID != tgID || p.Currency != currency || p.Amount != amount {
 		return ErrBadPayment
 	}
-	t, err := s.d.Store.Q.GetTariff(ctx, p.TariffID)
+	if p.Kind == KindPackage {
+		return s.packageOnSale(ctx, p)
+	}
+	t, err := s.d.Store.Q.GetTariff(ctx, p.TariffID.Int64)
 	if err != nil || t.Archived != 0 || t.OnSale == 0 {
 		return ErrNotForSale
 	}
@@ -415,7 +412,13 @@ func (s *Service) Apply(ctx context.Context, id int64) error {
 		created bool
 		done    bool
 	)
-	reset := s.Config(ctx).RenewResetsTraffic
+	// A payment is applied with the settings as they are; unreadable, it waits for the
+	// next attempt rather than guessing.
+	cfg, err := s.LoadConfig(ctx)
+	if err != nil {
+		return err
+	}
+	reset := cfg.RenewResetsTraffic
 	run := func(q *db.Queries) error {
 		var err error
 		if pay, err = q.GetPayment(ctx, id); err != nil {
@@ -425,11 +428,17 @@ func (s *Service) Apply(ctx context.Context, id int64) error {
 			done = true
 			return nil
 		}
+		if pay.Kind == KindPackage {
+			if u, err = s.applyPackage(ctx, q, pay); err != nil {
+				return err
+			}
+			return markApplied(ctx, q, id, u.ID, s.d.Now())
+		}
 		var userID int64
 		if pay.Kind == "renew" && pay.UserID.Valid {
 			userID = pay.UserID.Int64
 		}
-		if u, created, err = s.d.Users.Purchase(ctx, q, userID, pay.TariffID, buyerName(ctx, q, pay.TgID), reset); err != nil {
+		if u, created, err = s.d.Users.Purchase(ctx, q, userID, pay.TariffID.Int64, buyerName(ctx, q, pay.TgID), reset); err != nil {
 			return err
 		}
 		if created {
@@ -438,14 +447,9 @@ func (s *Service) Apply(ctx context.Context, id int64) error {
 			}
 			_ = q.SetTgCurrent(ctx, db.SetTgCurrentParams{Current: u.ID, TgID: pay.TgID})
 		}
-		n, err := q.MarkPaymentApplied(ctx, db.MarkPaymentAppliedParams{UserID: sql.NullInt64{Int64: u.ID, Valid: true},
-			AppliedAt: sql.NullInt64{Int64: s.d.Now().Unix(), Valid: true}, ID: id})
-		if err == nil && n != 1 {
-			err = errors.New("payment changed while applying")
-		}
-		return err
+		return markApplied(ctx, q, id, u.ID, s.d.Now())
 	}
-	err := s.d.Store.Tx(ctx, run)
+	err = s.d.Store.Tx(ctx, run)
 	if errors.Is(err, domain.ErrNoSlots) {
 		if err = s.d.Users.RefillSlots(ctx); err == nil {
 			err = s.d.Store.Tx(ctx, run)
@@ -469,6 +473,17 @@ func (s *Service) Apply(ctx context.Context, id int64) error {
 	return nil
 }
 
+// markApplied moves a paid payment to applied on the transaction that applied it: the
+// paid→applied step happens once, so a payment never applies twice.
+func markApplied(ctx context.Context, q *db.Queries, id, userID int64, now time.Time) error {
+	n, err := q.MarkPaymentApplied(ctx, db.MarkPaymentAppliedParams{UserID: sql.NullInt64{Int64: userID, Valid: true},
+		AppliedAt: sql.NullInt64{Int64: now.Unix(), Valid: true}, ID: id})
+	if err == nil && n != 1 {
+		err = errors.New("payment changed while applying")
+	}
+	return err
+}
+
 // buyerName names a subscription bought by a Telegram account: its @username, its name,
 // or its id.
 func buyerName(ctx context.Context, q *db.Queries, tgID int64) string {
@@ -484,7 +499,7 @@ func buyerName(ctx context.Context, q *db.Queries, tgID int64) string {
 }
 
 // Refund returns a Stars payment to the buyer. The subscription stays as it is: the admin
-// decides about it. Rubles and crypto are refunded in the provider's own dashboard.
+// decides about it. Payments through adapters are refunded in the provider's dashboard.
 func (s *Service) Refund(ctx context.Context, id int64) error {
 	p, err := s.d.Store.Q.GetPayment(ctx, id)
 	if err != nil {
@@ -504,9 +519,9 @@ func (s *Service) Refund(ctx context.Context, id int64) error {
 	return err
 }
 
-// Run reconciles in the background: applies paid payments that failed to apply, asks
-// YooKassa and CryptoBot about open invoices (a webhook may never come) and expires
-// invoices nobody paid.
+// Run reconciles in the background: applies paid payments that failed to apply, asks the
+// adapters about open invoices (a webhook may never come), expires invoices nobody paid
+// and gets the host to install the adapters that took over the built-in providers.
 func (s *Service) Run(ctx context.Context) {
 	t := time.NewTicker(reconcileEvery)
 	defer t.Stop()
@@ -524,7 +539,22 @@ func (s *Service) Run(ctx context.Context) {
 func (s *Service) Reconcile(ctx context.Context) {
 	now := s.d.Now()
 	q := s.d.Store.Q
-	open, err := q.ListOpenPayments(ctx, now.Add(-7*24*time.Hour).Unix())
+	s.installMoved(ctx)
+	// Paid but not applied payments are tried for as long as they stay so: the buyer
+	// paid, and the admin sees why on the Payments page. Pending ones are asked about for
+	// the week an invoice can still be paid in.
+	paid, err := q.ListPaidPayments(ctx)
+	if err != nil {
+		s.d.Log.Error("billing: reconcile", "err", err)
+		return
+	}
+	for _, p := range paid {
+		if ctx.Err() != nil {
+			return
+		}
+		_ = s.Apply(ctx, p.ID)
+	}
+	open, err := q.ListPendingPayments(ctx, now.Add(-pendingTTL).Unix())
 	if err != nil {
 		s.d.Log.Error("billing: reconcile", "err", err)
 		return
@@ -533,18 +563,23 @@ func (s *Service) Reconcile(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		switch {
-		case p.Status == "paid":
-			_ = s.Apply(ctx, p.ID)
-		case p.Provider == YooKassa && p.ExternalID.Valid:
-			_ = s.checkYooKassa(ctx, p.ExternalID.String)
-		case p.Provider == CryptoBot && p.ExternalID.Valid:
-			_ = s.checkCryptoBot(ctx, p.ExternalID.String)
+		if AddonID(p.Provider) == "" || !p.ExternalID.Valid || !dueCheck(p, now) {
+			continue
 		}
+		_ = s.checkAddon(ctx, p.Provider, p.ExternalID.String)
 	}
 	if _, err := q.ExpirePayments(ctx, now.Add(-pendingTTL).Unix()); err != nil {
 		s.d.Log.Error("billing: expire", "err", err)
 	}
+}
+
+// dueCheck spreads the asking out: an invoice is asked about every minute while the buyer
+// is likely paying it, then every ten minutes until it expires (a webhook comes anyway).
+func dueCheck(p db.Payment, now time.Time) bool {
+	if now.Sub(time.Unix(p.CreatedAt, 0)) < 15*time.Minute {
+		return true
+	}
+	return (now.Unix()/60+p.ID)%10 == 0
 }
 
 // WebhookToken is the secret path part of the webhook URLs, made once.
@@ -559,10 +594,12 @@ func (s *Service) WebhookToken(ctx context.Context) (string, error) {
 
 // errCode keeps provider errors short and free of secrets for the payments list.
 func errCode(err error) string {
-	var pe *providerError
+	var ae *addons.Error
 	switch {
-	case errors.As(err, &pe):
-		return pe.Code
+	case errors.As(err, &ae):
+		return ae.Code
+	case errors.Is(err, addons.ErrUnreachable), errors.Is(err, addons.ErrNotInstalled):
+		return "addon_unreachable"
 	case errors.Is(err, domain.ErrNoSlots):
 		return "no_slots"
 	case errors.Is(err, context.DeadlineExceeded):
@@ -574,27 +611,3 @@ func errCode(err error) string {
 	}
 	return msg
 }
-
-// CheckYooKassa tries the shop's keys (GET /me) before the admin saves them.
-func (s *Service) CheckYooKassa(ctx context.Context, shopID, secret string) error {
-	y := yooKassa{base: s.d.YooKassaAPI, shopID: shopID, secret: secret, hc: s.d.HTTP}
-	var me struct {
-		AccountID string `json:"account_id"`
-	}
-	return y.do(ctx, http.MethodGet, "/me", "", nil, &me)
-}
-
-// CheckCryptoBot tries an app token (getMe) before the admin saves it.
-func (s *Service) CheckCryptoBot(ctx context.Context, token string, testnet bool) error {
-	base := s.d.CryptoBotAPI
-	if testnet {
-		base = s.d.CryptoBotTestAPI
-	}
-	var me struct {
-		AppID int64 `json:"app_id"`
-	}
-	return cryptoBot{base: base, token: token, hc: s.d.HTTP}.call(ctx, "getMe", struct{}{}, &me)
-}
-
-// ErrorCode is a provider error's short code for the admin panel.
-func ErrorCode(err error) string { return errCode(err) }

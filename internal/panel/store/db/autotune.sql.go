@@ -227,6 +227,21 @@ func (q *Queries) SetInboundAuto(ctx context.Context, arg SetInboundAutoParams) 
 	return err
 }
 
+const setInboundListen = `-- name: SetInboundListen :exec
+UPDATE inbounds SET listen = ? WHERE id = ?
+`
+
+type SetInboundListenParams struct {
+	Listen string
+	ID     int64
+}
+
+// The listen address is the node's business, clients get nothing new: updated_at stays.
+func (q *Queries) SetInboundListen(ctx context.Context, arg SetInboundListenParams) error {
+	_, err := q.db.ExecContext(ctx, setInboundListen, arg.Listen, arg.ID)
+	return err
+}
+
 const upsertInboundReach = `-- name: UpsertInboundReach :exec
 INSERT INTO inbound_reach (slot, inbound_id, at) VALUES (?, ?, ?)
 ON CONFLICT (slot, inbound_id) DO UPDATE SET at = max(at, excluded.at)

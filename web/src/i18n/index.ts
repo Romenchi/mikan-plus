@@ -1,25 +1,31 @@
 // Keys live in code, texts in ru.json / en.json. Both files have the same shape (the
-// type check below fails the build when en.json misses a key); plural forms are written
-// inside the string, ICU-style: "{n, plural, one {# день} few {# дня} other {# дней}}".
+// type check in admin.ts fails the build when en.json misses a key); plural forms are
+// written inside the string, ICU-style: "{n, plural, one {# день} few {# дня} other {# дней}}".
+//
+// Only the dictionary of the language in use is loaded, before the first render
+// (initI18n), so t() stays synchronous at every call site. Each entry names what it
+// loads: the admin panel the whole file (admin.ts), the subscription page the few
+// sections it reads (sub.ts).
 import { useSyncExternalStore } from "react";
-import en from "./en.json";
-import ru from "./ru.json";
+import type ru from "./ru.json";
 
-export type Locale = "ru" | "en";
+type Locale = "ru" | "en";
 export const LOCALES: { id: Locale; label: string }[] = [
   { id: "ru", label: "Русский" },
   { id: "en", label: "English" },
 ];
 
-type Dict = typeof ru;
-const dicts: Record<Locale, Dict> = { ru, en: en satisfies Dict };
-
+export type Dict = typeof ru;
 type Leaves<T> = { [K in keyof T & string]: T[K] extends string ? K : `${K}.${Leaves<T[K]>}` }[keyof T & string];
 export type Key = Leaves<Dict>;
-export type Params = Record<string, string | number>;
+type Params = Record<string, string | number>;
+/** How an entry fetches a language's dictionary; the module's default export is the dictionary. */
+export type Loaders<D extends Partial<Dict> = Dict> = Record<Locale, () => Promise<{ default: D }>>;
 
 const STORAGE = "mikan.lang";
 let locale: Locale = detect();
+let loaders: Loaders<Partial<Dict>> | undefined;
+const loaded: Partial<Record<Locale, unknown>> = {};
 const listeners = new Set<() => void>();
 
 /** The visitor's own choice, then the panel's default language (the server puts it in
@@ -36,12 +42,26 @@ function detect(): Locale {
   return navigator.languages.some((l) => l.toLowerCase().startsWith("ru")) ? "ru" : "en";
 }
 
+async function ensure(l: Locale): Promise<void> {
+  if (loaded[l] || !loaders) return;
+  loaded[l] = (await loaders[l]()).default;
+}
+
+/** Loads the current language's dictionary; await it before rendering anything. */
+export async function initI18n(l: Loaders<Partial<Dict>>): Promise<void> {
+  loaders = l;
+  await ensure(locale);
+  document.documentElement.lang = locale;
+}
+
 export function getLocale(): Locale {
   return locale;
 }
 
-export function setLocale(l: Locale) {
+/** Switches the language once its dictionary is here (the first time it is fetched). */
+export async function setLocale(l: Locale): Promise<void> {
   if (l === locale) return;
+  await ensure(l);
   locale = l;
   try {
     localStorage.setItem(STORAGE, l);
@@ -52,7 +72,7 @@ export function setLocale(l: Locale) {
   listeners.forEach((f) => f());
 }
 
-/** Re-renders on a language switch; the apps key their root on it. */
+/** Re-renders on a language switch: a component that reads texts follows the language itself. */
 export function useLocale(): Locale {
   return useSyncExternalStore(
     (f) => {
@@ -64,13 +84,17 @@ export function useLocale(): Locale {
 }
 
 export function t(key: Key, params?: Params): string {
-  const s = lookup(dicts[locale], key) ?? lookup(dicts.ru, key) ?? key;
+  const s = lookup(loaded[locale], key);
+  if (s === undefined) {
+    if (import.meta.env.DEV) console.warn(`i18n: no "${key}" in the ${locale} dictionary of this page`);
+    return key;
+  }
   return params ? format(s, params) : s;
 }
 
 /** For keys built at runtime (API error codes, preset ids): undefined when missing. */
 export function tMaybe(key: string, params?: Params): string | undefined {
-  const s = lookup(dicts[locale], key);
+  const s = lookup(loaded[locale], key);
   return s === undefined ? undefined : params ? format(s, params) : s;
 }
 
@@ -99,5 +123,3 @@ function format(s: string, p: Params): string {
     return body.replace(/#/g, nf.format(n));
   });
 }
-
-document.documentElement.lang = locale;

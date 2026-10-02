@@ -39,14 +39,14 @@ func TestAPIKeys(t *testing.T) {
 	}
 	mk := func(name, scope string, days int) created {
 		t.Helper()
-		resp, body := h.do(http.MethodPost, api+"/api-keys", map[string]any{"name": name, "scope": scope, "expire_days": days}, csrf)
+		resp, body := h.do(http.MethodPost, api+"/api-keys", map[string]any{"name": name, "scope": scope, "expire_days": days, "password": password}, csrf)
 		var c created
 		if resp.StatusCode != http.StatusCreated || json.Unmarshal(body, &c) != nil || !strings.HasPrefix(c.Key, "mk_") || !strings.HasPrefix(c.Key, c.Prefix) {
 			t.Fatalf("create %s: %d %s", name, resp.StatusCode, body)
 		}
 		return c
 	}
-	for _, bad := range []map[string]any{{"name": " ", "scope": "full"}, {"name": "x", "scope": "admin"}, {"name": "x", "scope": "full", "expire_days": -1}} {
+	for _, bad := range []map[string]any{{"name": " ", "scope": "full", "password": password}, {"name": "x", "scope": "admin", "password": password}, {"name": "x", "scope": "full", "expire_days": -1, "password": password}} {
 		if resp, body := h.do(http.MethodPost, api+"/api-keys", bad, csrf); resp.StatusCode != http.StatusUnprocessableEntity {
 			t.Fatalf("%v accepted: %d %s", bad, resp.StatusCode, body)
 		}

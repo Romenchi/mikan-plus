@@ -40,8 +40,12 @@ type Account struct {
 	Plus                      bool
 }
 
-// Error is a short code for the admin panel.
-type Error struct{ Code string }
+// Error is a short code for the admin panel; Status is Cloudflare's HTTP status when it
+// refused (warp_refused).
+type Error struct {
+	Code   string
+	Status int
+}
 
 func (e *Error) Error() string { return e.Code }
 
@@ -84,7 +88,11 @@ func (c Client) do(ctx context.Context, method, path, token string, in, out any)
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode/100 != 2 {
-		return &Error{Code: "warp_refused_" + strconv.Itoa(resp.StatusCode)}
+		// Too many registrations has advice of its own: wait, or bring a config.
+		if resp.StatusCode == http.StatusTooManyRequests {
+			return &Error{Code: "warp_refused_429"}
+		}
+		return &Error{Code: "warp_refused", Status: resp.StatusCode}
 	}
 	if out == nil {
 		return nil

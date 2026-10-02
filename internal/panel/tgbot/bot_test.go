@@ -23,10 +23,24 @@ import (
 // fakeTelegram is the Bot API for tests: it hands out queued updates and records calls.
 type fakeTelegram struct {
 	mu      sync.Mutex
-	updates []Update
+	updates []Update // not yet confirmed by an offset past them, as at Telegram
+	seq     int64
+	offsets []int64 // the offset of each getUpdates
 	calls   []call
 	nextID  int64
 	blocked map[int64]bool // chats that blocked the bot
+	broken  map[string]bool
+	stall   map[string]time.Duration
+}
+
+// set breaks (answers with something that is no Bot API reply) or fixes a method.
+func (f *fakeTelegram) set(method string, broken bool) {
+	f.mu.Lock()
+	if f.broken == nil {
+		f.broken = map[string]bool{}
+	}
+	f.broken[method] = broken
+	f.mu.Unlock()
 }
 
 type call struct {
@@ -44,11 +58,21 @@ func (f *fakeTelegram) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ok(User{ID: 1, IsBot: true, FirstName: "Mikan", Username: "mikan_test_bot"})
 		return
 	case "getUpdates":
+		off, _ := body["offset"].(float64)
+		f.mu.Lock()
+		f.offsets = append(f.offsets, int64(off))
+		f.mu.Unlock()
 		deadline := time.Now().Add(200 * time.Millisecond)
 		for time.Now().Before(deadline) {
 			f.mu.Lock()
-			ups := f.updates
-			f.updates = nil
+			keep := f.updates[:0]
+			for _, u := range f.updates {
+				if u.UpdateID >= int64(off) {
+					keep = append(keep, u)
+				}
+			}
+			f.updates = keep
+			ups := append([]Update(nil), keep...)
 			f.mu.Unlock()
 			if len(ups) > 0 {
 				ok(ups)
@@ -65,7 +89,18 @@ func (f *fakeTelegram) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	blocked := f.blocked[int64(chat)]
 	f.nextID++
 	id := f.nextID
+	broken, stall := f.broken[method], f.stall[method]
 	f.mu.Unlock()
+	if stall > 0 {
+		select {
+		case <-time.After(stall):
+		case <-r.Context().Done():
+		}
+	}
+	if broken {
+		_, _ = w.Write([]byte("<html>bad gateway</html>"))
+		return
+	}
 	if blocked {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error_code": 403, "description": "Forbidden: bot was blocked by the user"})
 		return
@@ -82,7 +117,8 @@ func (f *fakeTelegram) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (f *fakeTelegram) push(u Update) {
 	f.mu.Lock()
-	u.UpdateID = int64(len(f.calls)) + 1000 + f.nextID
+	f.seq++
+	u.UpdateID = 1000 + f.seq
 	f.updates = append(f.updates, u)
 	f.mu.Unlock()
 }
@@ -427,21 +463,91 @@ func TestBot(t *testing.T) {
 		t.Fatalf("broadcast progress: %+v", p)
 	}
 
-	// Linked from another account, the subscription moves; the old owner is told.
+	// Somebody else holding the link does not take the subscription: its owner is asked.
+	// A refusal keeps it, and the same account is not let ask again at once.
+	owner := func() int64 { l, _ := e.st.Q.GetTgLink(e.ctx, e.user.ID); return l.TgID }
+	uid := strconv.FormatInt(e.user.ID, 10)
+	ask := func() []call {
+		e.later()
+		n := e.tg.count()
+		e.say(other, "https://vpn.example.com:21355/sub/"+e.user.SubToken)
+		// The answer to the one who asks and the question to the owner go out by different
+		// priorities, in either order: wait for both.
+		return e.tg.until(t, n, func(cs []call) bool {
+			told, asked := false, false
+			for _, c := range cs {
+				if c.method != "sendMessage" {
+					continue
+				}
+				told = told || c.body["chat_id"] == float64(other) && strings.Contains(text(c), "Эта подписка уже подключена")
+				asked = asked || c.body["chat_id"] == float64(anna) && strings.Contains(text(c), "хотят подключить")
+			}
+			return told && asked
+		})
+	}
+	calls = ask()
+	var question call
+	for _, c := range calls {
+		if c.method == "sendMessage" && c.body["chat_id"] == float64(anna) && strings.Contains(text(c), "хотят подключить") {
+			question = c
+		}
+	}
+	if question.method == "" || owner() != anna || !strings.Contains(text(question), "Анна") {
+		t.Fatalf("the owner is asked and keeps the subscription: %v", calls)
+	}
+	if b := buttons(question); b["✅ Разрешить"] != "ta:"+uid+":777" || b["❌ Отказать"] != "tx:"+uid+":777" {
+		t.Fatalf("the question's buttons: %v", b)
+	}
+	// Only the owner's chat answers: the account that asks cannot press its own request through.
 	e.later()
+	e.press(other, 4242, "ta:"+uid+":777")
+	time.Sleep(150 * time.Millisecond)
+	if owner() != anna {
+		t.Fatal("the requester allowed it for itself")
+	}
 	n = e.tg.count()
-	e.say(other, "https://vpn.example.com:21355/sub/"+e.user.SubToken)
-	moved := false
+	e.press(anna, 4242, "tx:"+uid+":777")
 	e.tg.until(t, n, func(cs []call) bool {
 		for _, c := range cs {
-			if c.method == "sendMessage" && c.body["chat_id"] == float64(anna) && strings.Contains(text(c), "другому аккаунту") {
-				moved = true
+			if c.method == "sendMessage" && c.body["chat_id"] == float64(other) && strings.Contains(text(c), "не разрешил") {
+				return true
 			}
 		}
-		return moved
+		return false
 	})
-	if l, _ := e.st.Q.GetTgLink(e.ctx, e.user.ID); l.TgID != other || !moved {
-		t.Fatalf("moved to %d, old owner told: %v", l.TgID, moved)
+	if owner() != anna {
+		t.Fatal("a refusal keeps the subscription")
+	}
+	n = e.tg.count()
+	e.later()
+	e.say(other, "https://vpn.example.com:21355/sub/"+e.user.SubToken)
+	again := e.tg.wait(t, n, "sendMessage")
+	for _, c := range again {
+		if c.method == "sendMessage" && c.body["chat_id"] == float64(anna) {
+			t.Fatalf("a refused account asks again at once and the owner is bothered: %q", text(c))
+		}
+	}
+
+	// An owner who allows it gives the subscription away: the other account gets it.
+	e.bot.mu.Lock()
+	e.bot.refused = map[string]time.Time{}
+	e.bot.mu.Unlock()
+	ask()
+	e.later()
+	e.press(anna, 4243, "ta:"+uid+":777")
+	deadline := time.Now().Add(3 * time.Second)
+	for owner() != other {
+		if time.Now().After(deadline) {
+			t.Fatalf("the owner allowed it, the subscription is with %d", owner())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// The same button pressed again does nothing: the request is spent.
+	e.later()
+	e.press(anna, 4243, "ta:"+uid+":777")
+	time.Sleep(150 * time.Millisecond)
+	if owner() != other {
+		t.Fatal("a spent request moved the subscription again")
 	}
 
 	// A user who blocked the bot is not written to again.
@@ -452,7 +558,7 @@ func TestBot(t *testing.T) {
 	n = e.tg.count()
 	e.say(other, "ещё")
 	e.tg.wait(t, n, "sendMessage")
-	deadline := time.Now().Add(2 * time.Second)
+	deadline = time.Now().Add(2 * time.Second)
 	for ch, _ := e.st.Q.GetTgChat(e.ctx, other); ch.Blocked != 1; ch, _ = e.st.Q.GetTgChat(e.ctx, other) {
 		if time.Now().After(deadline) {
 			t.Fatalf("blocked chat: %+v", ch)

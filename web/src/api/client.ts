@@ -7,11 +7,9 @@ export type User = Schemas["UserView"];
 export type Tariff = Schemas["TariffView"];
 export type Inbound = Schemas["InboundView"];
 export type Preset = Schemas["Info"];
-export type NodeView = Schemas["NodeView"];
 export type Overview = Schemas["OverviewOutputBody"];
 export type SettingsView = Schemas["SettingsView"];
 export type TrafficPoint = Schemas["TrafficPoint"];
-export type Me = Schemas["MeBody"];
 export type UserState = User["state"];
 
 // The server injects <base href="/<secret>/">; everything is relative to it.
@@ -27,6 +25,10 @@ export class ApiError extends Error {
   status: number;
   detail: string;
   fields: Record<string, string>;
+  /** The value the API sent with a field's error, such as the line of a bad rule. */
+  values: Record<string, unknown>;
+  /** Every detail's text in the API's order, several per field too (what a node is used by). */
+  messages: string[];
   retryAfter: number;
 
   constructor(status: number, body: unknown, retryAfter = 0) {
@@ -36,9 +38,16 @@ export class ApiError extends Error {
     this.detail = b.detail ?? "";
     this.retryAfter = retryAfter;
     this.fields = {};
+    this.values = {};
+    this.messages = [];
     // The API sends codes ("port_in_use") with an optional value; texts live in i18n.
     for (const e of b.errors ?? []) {
-      if (e.location) this.fields[e.location.replace(/^body\./, "")] = apiMessage(e.message ?? "", e.value);
+      const text = apiMessage(e.message ?? "", e.value);
+      this.messages.push(text);
+      if (!e.location) continue;
+      const field = e.location.replace(/^body\./, "");
+      this.fields[field] = text;
+      this.values[field] = e.value;
     }
   }
 }
@@ -90,5 +99,6 @@ export function errorText(e: unknown): string {
   if (e.status === 404) return t("errors.notFound");
   if (e.status === 409 || e.status === 422) return Object.values(e.fields)[0] || tMaybe(`errors.api.${e.detail}`) || t("errors.checkInput");
   if (e.status === 429) return t("errors.tooMany", { s: e.retryAfter || 60 });
-  return t("errors.server");
+  // A known code says more than "server error" (502 tg_unreachable, say).
+  return (e.detail ? tMaybe(`errors.api.${e.detail}`) : undefined) ?? t("errors.server");
 }

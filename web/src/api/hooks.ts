@@ -22,31 +22,41 @@ export const qk = {
   apiKeys: ["api-keys"] as const,
   payments: ["payments"] as const,
   paymentSettings: ["payment-settings"] as const,
+  addons: ["addons"] as const,
   warp: (node: number) => ["warp", node] as const,
+  cascade: (node: number) => ["cascade", node] as const,
+  pools: ["pools"] as const,
+  userPools: (id: number) => ["users", "pools", id] as const,
+  packages: ["packages"] as const,
+  userGrants: (id: number) => ["users", "grants", id] as const,
 };
 
 export const meQuery = {
   queryKey: qk.me,
-  queryFn: () => unwrap(api.GET("/api/v1/auth/me")),
+  queryFn: ({ signal }: { signal: AbortSignal }) => unwrap(api.GET("/api/v1/auth/me", { signal })),
   staleTime: 60_000,
   retry: false,
 };
 
-export type UsersFilter = { state: "all" | User["state"]; q: string };
+type UsersFilter = { state: "all" | User["state"]; q: string };
 
-export function useUsers(f: UsersFilter) {
+/** The users page lists everyone it can (the API's cap); a card that shows a few asks for just those. */
+const USERS_MAX = 500;
+
+export function useUsers(f: UsersFilter, o: { limit?: number; refetchInterval?: number } = {}) {
+  const limit = o.limit ?? USERS_MAX;
   return useQuery({
-    queryKey: [...qk.users, "list", f],
-    queryFn: () => unwrap(api.GET("/api/v1/users", { params: { query: { state: f.state, q: f.q || undefined, limit: 500 } } })),
+    queryKey: [...qk.users, "list", f, limit],
+    queryFn: ({ signal }) => unwrap(api.GET("/api/v1/users", { params: { query: { state: f.state, q: f.q || undefined, limit } }, signal })),
     placeholderData: keepPreviousData,
-    refetchInterval: 10_000,
+    refetchInterval: o.refetchInterval ?? 10_000,
   });
 }
 
 export function useUser(id: number | undefined) {
   return useQuery({
     queryKey: qk.user(id ?? 0),
-    queryFn: () => unwrap(api.GET("/api/v1/users/{id}", { params: { path: { id: id! } } })),
+    queryFn: ({ signal }) => unwrap(api.GET("/api/v1/users/{id}", { params: { path: { id: id! } }, signal })),
     enabled: !!id,
     refetchInterval: 5_000,
   });
@@ -55,14 +65,14 @@ export function useUser(id: number | undefined) {
 export function useUserTraffic(id: number) {
   return useQuery({
     queryKey: qk.userTraffic(id),
-    queryFn: () => unwrap(api.GET("/api/v1/users/{id}/traffic", { params: { path: { id }, query: { range: "30d" } } })),
+    queryFn: ({ signal }) => unwrap(api.GET("/api/v1/users/{id}/traffic", { params: { path: { id }, query: { range: "30d" } }, signal })),
   });
 }
 
 export function useDevices(id: number) {
   return useQuery({
     queryKey: qk.devices(id),
-    queryFn: () => unwrap(api.GET("/api/v1/users/{id}/devices", { params: { path: { id } } })),
+    queryFn: ({ signal }) => unwrap(api.GET("/api/v1/users/{id}/devices", { params: { path: { id } }, signal })),
     refetchInterval: 10_000,
   });
 }
@@ -71,53 +81,58 @@ export function useDevices(id: number) {
 export function useBoundDevices(id: number) {
   return useQuery({
     queryKey: qk.boundDevices(id),
-    queryFn: () => unwrap(api.GET("/api/v1/users/{id}/bound-devices", { params: { path: { id } } })),
+    queryFn: ({ signal }) => unwrap(api.GET("/api/v1/users/{id}/bound-devices", { params: { path: { id } }, signal })),
     refetchInterval: 10_000,
   });
 }
 
 export function useTariffs() {
-  return useQuery({ queryKey: qk.tariffs, queryFn: () => unwrap(api.GET("/api/v1/tariffs")) });
+  return useQuery({ queryKey: qk.tariffs, queryFn: ({ signal }) => unwrap(api.GET("/api/v1/tariffs", { signal })) });
 }
 
 export function useInbounds() {
-  return useQuery({ queryKey: qk.inbounds, queryFn: () => unwrap(api.GET("/api/v1/inbounds")), refetchInterval: 10_000 });
+  return useQuery({ queryKey: qk.inbounds, queryFn: ({ signal }) => unwrap(api.GET("/api/v1/inbounds", { signal })), refetchInterval: 10_000 });
 }
 
 export function usePresets() {
-  return useQuery({ queryKey: qk.presets, queryFn: () => unwrap(api.GET("/api/v1/presets")), staleTime: Infinity });
+  return useQuery({ queryKey: qk.presets, queryFn: ({ signal }) => unwrap(api.GET("/api/v1/presets", { signal })), staleTime: Infinity });
 }
 
 export function useOverview() {
-  return useQuery({ queryKey: qk.overview, queryFn: () => unwrap(api.GET("/api/v1/stats/overview")), refetchInterval: 10_000 });
+  return useQuery({ queryKey: qk.overview, queryFn: ({ signal }) => unwrap(api.GET("/api/v1/stats/overview", { signal })), refetchInterval: 10_000 });
 }
 
 export function useServerTraffic(range: "24h" | "7d" | "30d") {
   return useQuery({
     queryKey: qk.traffic(range),
-    queryFn: () => unwrap(api.GET("/api/v1/stats/traffic", { params: { query: { range } } })),
+    queryFn: ({ signal }) => unwrap(api.GET("/api/v1/stats/traffic", { params: { query: { range } }, signal })),
     placeholderData: keepPreviousData,
     refetchInterval: 60_000,
   });
 }
 
 export function useNode() {
-  return useQuery({ queryKey: qk.node, queryFn: () => unwrap(api.GET("/api/v1/node")), refetchInterval: 5_000 });
+  return useQuery({ queryKey: qk.node, queryFn: ({ signal }) => unwrap(api.GET("/api/v1/node", { signal })), refetchInterval: 5_000 });
 }
 
 export function useNodes() {
-  return useQuery({ queryKey: qk.nodes, queryFn: () => unwrap(api.GET("/api/v1/nodes")), refetchInterval: 10_000 });
+  return useQuery({ queryKey: qk.nodes, queryFn: ({ signal }) => unwrap(api.GET("/api/v1/nodes", { signal })), refetchInterval: 10_000 });
+}
+
+/** Payment settings: also whether selling is on, which shows Payments in the menu. */
+export function usePaymentSettings() {
+  return useQuery({ queryKey: qk.paymentSettings, queryFn: ({ signal }) => unwrap(api.GET("/api/v1/payments/settings", { signal })) });
 }
 
 export function useSettings() {
-  return useQuery({ queryKey: qk.settings, queryFn: () => unwrap(api.GET("/api/v1/settings")) });
+  return useQuery({ queryKey: qk.settings, queryFn: ({ signal }) => unwrap(api.GET("/api/v1/settings", { signal })) });
 }
 
 /** Followed every few seconds while the server updates, hourly otherwise. */
 export function useUpdates() {
   return useQuery({
     queryKey: qk.updates,
-    queryFn: () => unwrap(api.GET("/api/v1/updates")),
+    queryFn: ({ signal }) => unwrap(api.GET("/api/v1/updates", { signal })),
     refetchInterval: (q) => (q.state.data?.requested_at || q.state.data?.host?.state === "running" ? 5_000 : 3_600_000),
     retry: (n) => n < 30,
     retryDelay: 3_000,
@@ -151,3 +166,15 @@ export const userActions = {
 
 /** One paid period: a month up to the billing day, or 30 days without one. */
 export const onePeriod = (u: Pick<User, "billing_day">): Schemas["ExtendInputBody"] => (u.billing_day != null ? { months: 1 } : { days: 30 });
+
+export function usePools() {
+  return useQuery({ queryKey: qk.pools, queryFn: ({ signal }) => unwrap(api.GET("/api/v1/pools", { signal })) });
+}
+
+export function usePackages() {
+  return useQuery({ queryKey: qk.packages, queryFn: ({ signal }) => unwrap(api.GET("/api/v1/packages", { signal })) });
+}
+
+export function useUserGrants(id: number) {
+  return useQuery({ queryKey: qk.userGrants(id), queryFn: ({ signal }) => unwrap(api.GET("/api/v1/users/{id}/grants", { params: { path: { id } }, signal })) });
+}

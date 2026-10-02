@@ -5,7 +5,6 @@
 package release
 
 import (
-	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
@@ -76,9 +75,9 @@ func Parse(data []byte, sig string, pub ed25519.PublicKey) (Manifest, error) {
 	if err != nil || len(pub) != ed25519.PublicKeySize || !ed25519.Verify(pub, data, raw) {
 		return m, ErrSignature
 	}
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&m); err != nil {
+	// Unknown fields are ignored: the signature already vouches for every byte, and a
+	// manifest that gains a field must still be read by the panels already out there.
+	if err := json.Unmarshal(data, &m); err != nil {
 		return m, fmt.Errorf("release: manifest: %w", err)
 	}
 	if !versionRe.MatchString(m.Version) {

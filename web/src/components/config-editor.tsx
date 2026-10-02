@@ -1,10 +1,11 @@
 // YAML editor for listener templates. Loaded lazily: CodeMirror is only needed when an
 // admin opens the config tab.
 import { autocompletion, type CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
+import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { yaml } from "@codemirror/lang-yaml";
+import { defaultHighlightStyle, indentOnInput, syntaxHighlighting } from "@codemirror/language";
 import { EditorState } from "@codemirror/state";
-import { EditorView } from "@codemirror/view";
-import { basicSetup } from "codemirror";
+import { drawSelection, EditorView, highlightActiveLine, highlightActiveLineGutter, keymap, lineNumbers } from "@codemirror/view";
 import { useEffect, useRef } from "react";
 import { FINGERPRINTS } from "../lib/fingerprints";
 
@@ -14,7 +15,7 @@ const TOP: Record<string, string[]> = {
   vless: ["ws-path", "grpc-service-name", "xhttp-config", "reality-config", "mux-option", "decryption"],
   vmess: ["ws-path", "grpc-service-name", "reality-config", "mux-option"],
   trojan: ["ws-path", "grpc-service-name", "reality-config", "mux-option"],
-  hysteria2: ["obfs", "obfs-password", "alpn", "up", "down", "ignore-client-bandwidth", "masquerade", "max-idle-time", "cwnd", "udp-mtu", "bbr-profile"],
+  hysteria2: ["obfs", "obfs-password", "obfs-min-packet-size", "obfs-max-packet-size", "alpn", "up", "down", "ignore-client-bandwidth", "masquerade", "max-idle-time", "cwnd", "udp-mtu", "bbr-profile"],
   tuic: ["congestion-controller", "alpn", "max-idle-time", "authentication-timeout", "max-udp-relay-packet-size", "cwnd", "bbr-profile"],
   anytls: ["padding-scheme"],
   trusttunnel: ["congestion-controller", "cwnd", "bbr-profile"],
@@ -38,7 +39,7 @@ const VALUES: Record<string, string[]> = {
   mode: ["stream-one", "stream-up", "packet-up"],
   tls: ["node"],
   flow: ["xtls-rprx-vision"],
-  obfs: ["salamander"],
+  obfs: ["salamander", "gecko"],
   "congestion-controller": ["bbr", "cubic", "new_reno"],
   cipher: ["2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305"],
   transport: ["TCP"],
@@ -105,7 +106,17 @@ export default function ConfigEditor({ value, onChange, label, invalid }: { valu
       state: EditorState.create({
         doc: value,
         extensions: [
-          basicSetup,
+          // What a short YAML template needs. The "codemirror" package's basicSetup also brings
+          // search, lint, folding, bracket matching and more, and binds keys (Ctrl+F,
+          // Ctrl+Shift+M) the form has no use for.
+          lineNumbers(),
+          highlightActiveLineGutter(),
+          highlightActiveLine(),
+          history(),
+          drawSelection(),
+          indentOnInput(),
+          syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+          keymap.of([...defaultKeymap, ...historyKeymap]),
           yaml(),
           autocompletion({ override: [complete] }),
           theme,

@@ -12,7 +12,7 @@ docker compose build node target
 
 PW=$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 20)
 echo "$PW" | docker compose run --rm -T panel admin bootstrap \
-  --public-host node --port 2053 --admin-path slice-admin-path-0000 --sub-path slicesub0000 --username admin --password-stdin >/dev/null
+  --public-host node.test --port 2053 --admin-path slice-admin-path-0000 --sub-path slicesub0000 --username admin --password-stdin >/dev/null
 docker compose up -d node panel target driver
 
 status=0
@@ -25,6 +25,14 @@ if [ "$status" = 0 ]; then
   docker compose --profile client up -d client
   sleep 3
   docker compose exec -T -e SLICE_PW="$PW" driver go run ./test/slice/driver verify || status=$?
+fi
+# Pools: VLESS Vision counts to a small traffic pool of its own.
+if [ "$status" = 0 ]; then
+  docker compose exec -T -e SLICE_PW="$PW" driver go run ./test/slice/driver pools || status=$?
+fi
+# Cascade: the panel's node sends VLESS Vision out through node2.
+if [ "$status" = 0 ]; then
+  docker compose exec -T -e SLICE_PW="$PW" driver go run ./test/slice/driver cascade || status=$?
 fi
 # Devices: the client also gets a device's own keys, then the admin unbinds the device.
 if [ "$status" = 0 ]; then

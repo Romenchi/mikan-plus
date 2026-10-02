@@ -32,13 +32,15 @@ var (
 )
 
 // State derives what the user can do right now; limited and expired are never stored.
-func State(u db.User, now time.Time) string {
+// grants is what is left of the user's active main grants (GrantsLeft.Main): a user past
+// the base quota with grants left is not limited.
+func State(u db.User, grants int64, now time.Time) string {
 	switch {
 	case u.Status == "disabled":
 		return StateDisabled
 	case u.ExpiresAt.Valid && now.Unix() >= u.ExpiresAt.Int64:
 		return StateExpired
-	case u.TrafficLimit.Valid && u.UsedUp+u.UsedDown >= u.TrafficLimit.Int64:
+	case TrafficLeft(u.TrafficLimit, u.UsedUp+u.UsedDown, grants) == 0:
 		return StateLimited
 	case u.ExpiresAt.Valid && time.Unix(u.ExpiresAt.Int64, 0).Sub(now) <= expiringWindow:
 		return StateExpiring
@@ -133,13 +135,17 @@ func (s *Users) createTx(ctx context.Context, q *db.Queries, in CreateInput, any
 	if err != nil {
 		return db.User{}, err
 	}
-	return q.CreateUser(ctx, db.CreateUserParams{
+	u, err := q.CreateUser(ctx, db.CreateUserParams{
 		Name: strings.TrimSpace(in.Name), Contact: strings.TrimSpace(in.Contact), Note: in.Note, Tags: tags,
 		TariffID: sql.NullInt64{Int64: t.ID, Valid: true}, TrafficLimit: t.TrafficLimit, DeviceLimit: t.DeviceLimit,
 		ResetStrategy: t.ResetStrategy, PeriodDays: 30, PeriodStart: now,
 		ExpiresAt:  tariffExpiry(time.Unix(now, 0), durationTariff{t.DurationDays, t.BillingDay}),
 		BillingDay: t.BillingDay, SubToken: secure.Token(24), SlotID: sql.NullInt64{Int64: slot.ID, Valid: true}, CreatedAt: now, UpdatedAt: now,
 	})
+	if err != nil {
+		return u, err
+	}
+	return u, ApplyTariffPools(ctx, q, u.ID, t.ID)
 }
 
 // Purchase applies a paid tariff on q's transaction, so the payment and its effect commit
@@ -181,10 +187,13 @@ func (s *Users) Purchase(ctx context.Context, q *db.Queries, userID, tariffID in
 	if err != nil {
 		return u, false, err
 	}
+	if err := ApplyTariffPools(ctx, q, u.ID, t.ID); err != nil {
+		return u, false, err
+	}
 	if !resetTraffic {
 		return u, false, nil
 	}
-	if err := q.ResetUserTraffic(ctx, db.ResetUserTrafficParams{PeriodStart: now.Unix(), UpdatedAt: now.Unix(), ID: u.ID}); err != nil {
+	if err := StartPeriod(ctx, q, u.ID, now.Unix(), now); err != nil {
 		return u, false, err
 	}
 	u, err = q.GetUser(ctx, u.ID)
@@ -233,6 +242,36 @@ type Patch struct {
 	ClearBillingDay     bool
 	Inbounds            *[]int64 // empty slice = all inbounds
 	TariffID            *int64   // applies the tariff's limits and restarts the term from now
+	// Extend adds a term to the expiry the transaction reads, so a payment that lands
+	// meanwhile is not overwritten by an absolute date worked out before it.
+	Extend *Extension
+}
+
+// Extension adds time to the current expiry, or to now when the term already ended. Days
+// adds that many; Months goes to the n-th billing day, or without one to the same day of
+// the month (see AddMonths); Period is one paid period: a month up to the billing day, or
+// 30 days without one. It also turns the user on.
+type Extension struct {
+	Days   int64
+	Months int
+	Period bool
+}
+
+// until is where the term ends after the extension, counted from the expiry exp.
+func (e Extension) until(now time.Time, exp sql.NullInt64, billingDay sql.NullInt64) time.Time {
+	base := now
+	if exp.Valid && time.Unix(exp.Int64, 0).After(now) {
+		base = time.Unix(exp.Int64, 0)
+	}
+	switch {
+	case e.Period && billingDay.Valid:
+		return AddMonths(base, 1, billingDay)
+	case e.Period:
+		return base.Add(30 * 24 * time.Hour)
+	case e.Months > 0:
+		return AddMonths(base, e.Months, billingDay)
+	}
+	return base.Add(time.Duration(e.Days) * 24 * time.Hour)
 }
 
 // ErrBadBillingDay: a billing day is 1–31.
@@ -240,89 +279,8 @@ var ErrBadBillingDay = errors.New("bad_billing_day")
 
 func (s *Users) Update(ctx context.Context, id int64, p Patch) (db.User, error) {
 	var out db.User
-	err := s.st.Tx(ctx, func(q *db.Queries) error {
-		u, err := q.GetUser(ctx, id)
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrNotFound
-		}
-		if err != nil {
-			return err
-		}
-		now := s.now().Unix()
-		par := db.UpdateUserParams{
-			Name: u.Name, Contact: u.Contact, Note: u.Note, Tags: u.Tags, Status: u.Status, TariffID: u.TariffID,
-			TrafficLimit: u.TrafficLimit, DeviceLimit: u.DeviceLimit, ResetStrategy: u.ResetStrategy,
-			PeriodDays: u.PeriodDays, PeriodStart: u.PeriodStart, ExpiresAt: u.ExpiresAt, Inbounds: u.Inbounds,
-			BillingDay: u.BillingDay, UpdatedAt: now, ID: u.ID,
-		}
-		if p.TariffID != nil {
-			t, err := q.GetTariff(ctx, *p.TariffID)
-			if errors.Is(err, sql.ErrNoRows) || (err == nil && t.Archived != 0) {
-				return fmt.Errorf("tariff %d: %w", *p.TariffID, ErrNotFound)
-			}
-			if err != nil {
-				return err
-			}
-			par.TariffID = sql.NullInt64{Int64: t.ID, Valid: true}
-			par.TrafficLimit, par.DeviceLimit, par.ResetStrategy, par.BillingDay = t.TrafficLimit, t.DeviceLimit, t.ResetStrategy, t.BillingDay
-			par.ExpiresAt = tariffExpiry(time.Unix(now, 0), durationTariff{t.DurationDays, t.BillingDay})
-		}
-		switch {
-		case p.ClearBillingDay:
-			par.BillingDay = sql.NullInt64{}
-		case p.BillingDay != nil:
-			if !ValidBillingDay(*p.BillingDay) {
-				return ErrBadBillingDay
-			}
-			par.BillingDay = sql.NullInt64{Int64: *p.BillingDay, Valid: true}
-		}
-		if p.Name != nil {
-			par.Name = strings.TrimSpace(*p.Name)
-		}
-		if p.Contact != nil {
-			par.Contact = strings.TrimSpace(*p.Contact)
-		}
-		if p.Note != nil {
-			par.Note = *p.Note
-		}
-		if p.Tags != nil {
-			if par.Tags, err = encodeTags(*p.Tags); err != nil {
-				return err
-			}
-		}
-		if p.Disabled != nil {
-			par.Status = "active"
-			if *p.Disabled {
-				par.Status = "disabled"
-			}
-		}
-		switch {
-		case p.ClearTrafficLimit:
-			par.TrafficLimit = sql.NullInt64{}
-		case p.TrafficLimit != nil:
-			par.TrafficLimit = sql.NullInt64{Int64: *p.TrafficLimit, Valid: true}
-		}
-		switch {
-		case p.ClearDeviceLimit:
-			par.DeviceLimit = sql.NullInt64{}
-		case p.DeviceLimit != nil:
-			par.DeviceLimit = sql.NullInt64{Int64: *p.DeviceLimit, Valid: true}
-		}
-		switch {
-		case p.ClearExpiry:
-			par.ExpiresAt = sql.NullInt64{}
-		case p.ExpiresAt != nil:
-			par.ExpiresAt = sql.NullInt64{Int64: p.ExpiresAt.Unix(), Valid: true}
-		}
-		if p.Inbounds != nil {
-			if len(*p.Inbounds) == 0 {
-				par.Inbounds = sql.NullString{}
-			} else {
-				raw, _ := json.Marshal(*p.Inbounds)
-				par.Inbounds = sql.NullString{String: string(raw), Valid: true}
-			}
-		}
-		out, err = q.UpdateUser(ctx, par)
+	err := s.st.Tx(ctx, func(q *db.Queries) (err error) {
+		out, err = s.updateOn(ctx, q, id, p)
 		return err
 	})
 	if err == nil {
@@ -331,58 +289,134 @@ func (s *Users) Update(ctx context.Context, id int64, p Patch) (db.User, error) 
 	return out, err
 }
 
-// Extend adds days to the current expiry, or to now if the term already ended.
-func (s *Users) Extend(ctx context.Context, id int64, days int64) (db.User, error) {
-	u, err := s.Get(ctx, id)
+// updateOn applies a patch on q's transaction; the caller tells the nodes.
+func (s *Users) updateOn(ctx context.Context, q *db.Queries, id int64, p Patch) (db.User, error) {
+	u, err := q.GetUser(ctx, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return db.User{}, ErrNotFound
+	}
 	if err != nil {
-		return u, err
+		return db.User{}, err
 	}
-	now := s.now()
-	base := now
-	if u.ExpiresAt.Valid && time.Unix(u.ExpiresAt.Int64, 0).After(now) {
-		base = time.Unix(u.ExpiresAt.Int64, 0)
+	now := s.now().Unix()
+	par := db.UpdateUserParams{
+		Name: u.Name, Contact: u.Contact, Note: u.Note, Tags: u.Tags, Status: u.Status, TariffID: u.TariffID,
+		TrafficLimit: u.TrafficLimit, DeviceLimit: u.DeviceLimit, ResetStrategy: u.ResetStrategy,
+		PeriodDays: u.PeriodDays, PeriodStart: u.PeriodStart, ExpiresAt: u.ExpiresAt, Inbounds: u.Inbounds,
+		BillingDay: u.BillingDay, UpdatedAt: now, ID: u.ID,
 	}
-	until := base.Add(time.Duration(days) * 24 * time.Hour)
-	enable := false
-	return s.Update(ctx, id, Patch{ExpiresAt: &until, Disabled: &enable})
+	if p.TariffID != nil {
+		t, err := q.GetTariff(ctx, *p.TariffID)
+		if errors.Is(err, sql.ErrNoRows) || (err == nil && t.Archived != 0) {
+			return db.User{}, fmt.Errorf("tariff %d: %w", *p.TariffID, ErrNotFound)
+		}
+		if err != nil {
+			return db.User{}, err
+		}
+		par.TariffID = sql.NullInt64{Int64: t.ID, Valid: true}
+		par.TrafficLimit, par.DeviceLimit, par.ResetStrategy, par.BillingDay = t.TrafficLimit, t.DeviceLimit, t.ResetStrategy, t.BillingDay
+		par.ExpiresAt = tariffExpiry(time.Unix(now, 0), durationTariff{t.DurationDays, t.BillingDay})
+		if err := ApplyTariffPools(ctx, q, u.ID, t.ID); err != nil {
+			return db.User{}, err
+		}
+	}
+	switch {
+	case p.ClearBillingDay:
+		par.BillingDay = sql.NullInt64{}
+	case p.BillingDay != nil:
+		if !ValidBillingDay(*p.BillingDay) {
+			return db.User{}, ErrBadBillingDay
+		}
+		par.BillingDay = sql.NullInt64{Int64: *p.BillingDay, Valid: true}
+	}
+	if p.Name != nil {
+		par.Name = strings.TrimSpace(*p.Name)
+	}
+	if p.Contact != nil {
+		par.Contact = strings.TrimSpace(*p.Contact)
+	}
+	if p.Note != nil {
+		par.Note = *p.Note
+	}
+	if p.Tags != nil {
+		if par.Tags, err = encodeTags(*p.Tags); err != nil {
+			return db.User{}, err
+		}
+	}
+	if p.Disabled != nil {
+		par.Status = "active"
+		if *p.Disabled {
+			par.Status = "disabled"
+		}
+	}
+	switch {
+	case p.ClearTrafficLimit:
+		par.TrafficLimit = sql.NullInt64{}
+	case p.TrafficLimit != nil:
+		par.TrafficLimit = sql.NullInt64{Int64: *p.TrafficLimit, Valid: true}
+	}
+	switch {
+	case p.ClearDeviceLimit:
+		par.DeviceLimit = sql.NullInt64{}
+	case p.DeviceLimit != nil:
+		par.DeviceLimit = sql.NullInt64{Int64: *p.DeviceLimit, Valid: true}
+	}
+	switch {
+	case p.ClearExpiry:
+		par.ExpiresAt = sql.NullInt64{}
+	case p.ExpiresAt != nil:
+		par.ExpiresAt = sql.NullInt64{Int64: p.ExpiresAt.Unix(), Valid: true}
+	}
+	if p.Extend != nil {
+		par.ExpiresAt = sql.NullInt64{Int64: p.Extend.until(s.now(), par.ExpiresAt, par.BillingDay).Unix(), Valid: true}
+		par.Status = "active"
+	}
+	if p.Inbounds != nil {
+		if len(*p.Inbounds) == 0 {
+			par.Inbounds = sql.NullString{}
+		} else {
+			raw, _ := json.Marshal(*p.Inbounds)
+			par.Inbounds = sql.NullString{String: string(raw), Valid: true}
+		}
+	}
+	return q.UpdateUser(ctx, par)
+}
+
+// Extend adds days to the current expiry, or to now if the term already ended.
+// The three extensions read the user and write the new expiry in one transaction (Update).
+func (s *Users) Extend(ctx context.Context, id int64, days int64) (db.User, error) {
+	return s.Update(ctx, id, Patch{Extend: &Extension{Days: days}})
 }
 
 // ExtendMonths adds n months: to the n-th billing day, or without one to the same day of
 // the month (see AddMonths). A term that already ended restarts from now.
 func (s *Users) ExtendMonths(ctx context.Context, id int64, n int) (db.User, error) {
-	u, err := s.Get(ctx, id)
-	if err != nil {
-		return u, err
-	}
-	now := s.now()
-	base := now
-	if u.ExpiresAt.Valid && time.Unix(u.ExpiresAt.Int64, 0).After(now) {
-		base = time.Unix(u.ExpiresAt.Int64, 0)
-	}
-	until := AddMonths(base, n, u.BillingDay)
-	enable := false
-	return s.Update(ctx, id, Patch{ExpiresAt: &until, Disabled: &enable})
+	return s.Update(ctx, id, Patch{Extend: &Extension{Months: n}})
 }
 
 // ExtendPeriod adds one paid period: a month up to the billing day, or 30 days without one.
 func (s *Users) ExtendPeriod(ctx context.Context, id int64) (db.User, error) {
-	u, err := s.Get(ctx, id)
-	if err != nil {
-		return u, err
-	}
-	if u.BillingDay.Valid {
-		return s.ExtendMonths(ctx, id, 1)
-	}
-	return s.Extend(ctx, id, 30)
+	return s.Update(ctx, id, Patch{Extend: &Extension{Period: true}})
 }
 
+// ResetTraffic starts a new traffic period now (see StartPeriod).
 func (s *Users) ResetTraffic(ctx context.Context, id int64) (db.User, error) {
-	now := s.now().Unix()
-	if err := s.st.Q.ResetUserTraffic(ctx, db.ResetUserTrafficParams{PeriodStart: now, UpdatedAt: now, ID: id}); err != nil {
+	err := s.st.Tx(ctx, func(q *db.Queries) error { return s.resetOn(ctx, q, id) })
+	if err != nil {
 		return db.User{}, err
 	}
 	s.changes.PoliciesChanged()
 	return s.Get(ctx, id)
+}
+
+func (s *Users) resetOn(ctx context.Context, q *db.Queries, id int64) error {
+	if _, err := q.GetUser(ctx, id); errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return err
+	}
+	now := s.now()
+	return StartPeriod(ctx, q, id, now.Unix(), now)
 }
 
 // Reissue gives the user a new slot and subscription token. The old credentials stop
@@ -434,29 +468,88 @@ func (s *Users) reissue(ctx context.Context, id int64) error {
 }
 
 func (s *Users) Delete(ctx context.Context, id int64) error {
-	now := s.now().Unix()
-	err := s.st.Tx(ctx, func(q *db.Queries) error {
-		u, err := q.GetUser(ctx, id)
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrNotFound
-		}
-		if err != nil {
-			return err
-		}
-		if u.SlotID.Valid {
-			if err := q.BurnSlot(ctx, db.BurnSlotParams{BurnedAt: sql.NullInt64{Int64: now, Valid: true}, ID: u.SlotID.Int64}); err != nil {
-				return err
-			}
-		}
-		if err := burnDevices(ctx, q, id, now); err != nil {
-			return err
-		}
-		return q.DeleteUser(ctx, id)
-	})
+	err := s.st.Tx(ctx, func(q *db.Queries) error { return s.deleteOn(ctx, q, id) })
 	if err == nil {
 		s.changes.PoliciesChanged()
 	}
 	return err
+}
+
+func (s *Users) deleteOn(ctx context.Context, q *db.Queries, id int64) error {
+	now := s.now().Unix()
+	u, err := q.GetUser(ctx, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if u.SlotID.Valid {
+		if err := q.BurnSlot(ctx, db.BurnSlotParams{BurnedAt: sql.NullInt64{Int64: now, Valid: true}, ID: u.SlotID.Int64}); err != nil {
+			return err
+		}
+	}
+	if err := burnDevices(ctx, q, id, now); err != nil {
+		return err
+	}
+	return q.DeleteUser(ctx, id)
+}
+
+// Bulk actions of the admin's list.
+const (
+	BulkExtend  = "extend"
+	BulkReset   = "reset"
+	BulkDisable = "disable"
+	BulkEnable  = "enable"
+	BulkDelete  = "delete"
+)
+
+// Bulk does one action to every user of ids in one transaction: all of them, or, if one
+// fails, none (half a list applied, and no record of it, was what a loop of single
+// changes left behind). A user that is gone is skipped; a user listed twice is done once.
+// days is for BulkExtend (0: one paid period). It returns how many users changed.
+func (s *Users) Bulk(ctx context.Context, ids []int64, action string, days int64) (int, error) {
+	done := 0
+	err := s.st.Tx(ctx, func(q *db.Queries) error {
+		done = 0
+		seen := make(map[int64]bool, len(ids))
+		for _, id := range ids {
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			var err error
+			switch action {
+			case BulkExtend:
+				ext := Extension{Days: days, Period: days <= 0}
+				_, err = s.updateOn(ctx, q, id, Patch{Extend: &ext})
+			case BulkReset:
+				err = s.resetOn(ctx, q, id)
+			case BulkDisable, BulkEnable:
+				off := action == BulkDisable
+				_, err = s.updateOn(ctx, q, id, Patch{Disabled: &off})
+			case BulkDelete:
+				err = s.deleteOn(ctx, q, id)
+			default:
+				return fmt.Errorf("bulk action %q", action)
+			}
+			if errors.Is(err, ErrNotFound) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			done++
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	if done > 0 {
+		s.changes.PoliciesChanged()
+	}
+	return done, nil
 }
 
 func encodeTags(tags []string) (string, error) {

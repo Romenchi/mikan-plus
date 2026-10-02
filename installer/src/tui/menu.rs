@@ -17,10 +17,13 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, LineGauge, Padding, Pa
 
 use super::Screen;
 use super::widgets::{self, ACCENT, DIM, ERR, FAINT, Input, OK, Task, WARN, center, dim, field, item, spinner, wrap};
-use crate::ops::{self, Install, UpdateArgs};
+use crate::envfile::EnvFile;
+use crate::lock::{self, Wait};
+use crate::ops::{self, Install};
 use crate::release::{self, Manifest};
 use crate::sites::{self, Site};
-use crate::{docker, system};
+use crate::update::{self, UpdateArgs};
+use crate::{DIR, backup, docker, system};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Section {
@@ -152,6 +155,11 @@ pub struct Menu {
     scan: Task<anyhow::Result<sites::Scan>>,
     rows: Vec<Site>,
     gone: bool,
+    /// Whether the panel's settings have automatic updates on (a file of the panel's, read
+    /// every few seconds with the status, not on every frame).
+    policy_on: bool,
+    /// When a quit was refused because an operation runs.
+    denied: Option<Instant>,
 }
 
 impl Menu {
@@ -203,6 +211,8 @@ impl Menu {
             scan: Task::Idle,
             rows: Vec::new(),
             gone: false,
+            policy_on: false,
+            denied: None,
         };
         m.refresh_status();
         Ok(m)
@@ -220,7 +230,45 @@ impl Menu {
         self.sections[self.at]
     }
 
+    /// Whether an update, a backup, a restore or another change is running: the menu does
+    /// not close on it, because the process would end with it half done.
+    fn busy(&self) -> bool {
+        self.updating.is_some() || self.job.running()
+    }
+
+    /// Quits unless something is running; then it says why not.
+    fn quit(&mut self) -> bool {
+        if self.busy() {
+            self.denied = Some(Instant::now());
+            return false;
+        }
+        self.stop_logs();
+        true
+    }
+
+    /// Switches a node's automatic updates. .env is read again first: the node's own timer
+    /// may have changed its image since the menu opened, and saving the old copy would put
+    /// the old version back.
+    fn toggle_auto(&mut self) {
+        let mut quiet = |_: &str| {};
+        let result = (|| -> anyhow::Result<()> {
+            let Some(_lock) = lock::acquire(Wait::Skip, &mut quiet)? else {
+                anyhow::bail!("an update or another change is running: try again when it ends");
+            };
+            let mut env = EnvFile::load(std::path::Path::new(DIR).join(".env"))?;
+            let on = env.get("MIKAN_AUTO_UPDATE") == Some("1");
+            env.set("MIKAN_AUTO_UPDATE", if on { "0" } else { "1" })?;
+            env.save()?;
+            self.install.env = env;
+            Ok(())
+        })();
+        if let Err(e) = result {
+            self.upd_result = Some(Err(format!("not changed: {e:#}")));
+        }
+    }
+
     fn refresh_status(&mut self) {
+        self.policy_on = update::policy_on();
         let node_port = self.install.node_port();
         self.status = Task::start(move || Status {
             services: docker::services().unwrap_or_default(),
@@ -251,7 +299,7 @@ impl Menu {
             Section::Logs if self.logs.is_none() => self.start_logs(),
             Section::Access if self.url.idle() => self.url = job(|| admin_text(&["url"])),
             Section::Nodes if self.nodes.idle() => self.nodes = job(|| admin_text(&["node", "list"])),
-            Section::Backups => self.backups = ops::backups(),
+            Section::Backups => self.backups = backup::backups(),
             _ => {}
         }
     }
@@ -284,7 +332,7 @@ impl Menu {
         thread::spawn(move || {
             let lines = tx.clone();
             let progress = tx.clone();
-            let r = ops::update(
+            let r = update::update(
                 &UpdateArgs::default(),
                 &mut |l| {
                     let _ = lines.send(Upd::Line(l.to_owned()));
@@ -399,12 +447,16 @@ impl Menu {
                 job(move || {
                     let out = docker::check(docker::admin(&["node", "key", value.as_str()], None)?)?;
                     let key = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-                    Ok(format!("The old key no longer works. On the node's server run:\n\nmikan join {key}"))
+                    Ok(format!(
+                        "The old key no longer works. On the node's server run `mikan join` and paste this key when asked (it holds the node's private key, so it stays out of the command line):\n\n{key}"
+                    ))
                 }),
             ),
-            Act::Backup => ("Backup", job(|| ops::backup().map(|f| format!("Saved {}", f.display())))),
-            Act::Restore(f) => ("Restore", job(move || ops::restore(&f).map(|()| format!("Restored from {}", f.display())))),
-            Act::Join => ("Join key", job(move || ops::join(&value).map(|()| "The node runs with the new key.".into()))),
+            Act::Backup => ("Backup", job(|| backup::backup(&mut |_| {}).map(|f| format!("Saved {}", f.display())))),
+            Act::Restore(f) => {
+                ("Restore", job(move || backup::restore(&f, &mut |_| {}).map(|()| format!("Restored from {}", f.display()))))
+            }
+            Act::Join => ("Join key", job(move || ops::join(&value, None).map(|()| "The node runs with the new key.".into()))),
             Act::Uninstall => ("Uninstall", job(|| ops::uninstall().map(|()| "Done. Press Enter to leave.".into()))),
         };
         self.job_title = title.to_owned();
@@ -463,7 +515,7 @@ impl Screen for Menu {
                 self.notes.push(format!("{}:\n{text}", self.job_title));
             }
             match self.job_at {
-                Section::Backups => self.backups = ops::backups(),
+                Section::Backups => self.backups = backup::backups(),
                 Section::Uninstall => self.gone = matches!(self.job.done(), Some(Ok(_))),
                 Section::Access => self.url = job(|| admin_text(&["url"])),
                 Section::Nodes => self.nodes = job(|| admin_text(&["node", "list"])),
@@ -499,10 +551,15 @@ impl Screen for Menu {
         }
     }
 
+    fn paste(&mut self, text: &str) {
+        if let Some(Prompt::Text { input, .. }) = &mut self.prompt {
+            input.paste(text);
+        }
+    }
+
     fn key(&mut self, k: KeyEvent) -> bool {
         if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
-            self.stop_logs();
-            return true;
+            return self.quit();
         }
         if self.prompt.is_some() {
             self.prompt_key(k);
@@ -528,10 +585,7 @@ impl Screen for Menu {
                         self.enter();
                     }
                 }
-                KeyCode::Char('q') | KeyCode::Esc => {
-                    self.stop_logs();
-                    return true;
-                }
+                KeyCode::Char('q') | KeyCode::Esc => return self.quit(),
                 _ => {}
             }
             return false;
@@ -550,15 +604,8 @@ impl Screen for Menu {
             KeyCode::Down | KeyCode::Char('j') => self.pick = (self.pick + 1).min(self.rows_len().saturating_sub(1)),
             KeyCode::Enter => self.enter(),
             KeyCode::Char('r') if self.section() == Section::Sites && !self.scan.running() => self.scan = Task::start(sites::scan),
-            KeyCode::Char('a') if self.section() == Section::Update && self.install.node => {
-                let on = self.install.env.get("MIKAN_AUTO_UPDATE") == Some("1");
-                let _ = self.install.env.set("MIKAN_AUTO_UPDATE", if on { "0" } else { "1" });
-                let _ = self.install.env.save();
-            }
-            KeyCode::Char('q') => {
-                self.stop_logs();
-                return true;
-            }
+            KeyCode::Char('a') if self.section() == Section::Update && self.install.node => self.toggle_auto(),
+            KeyCode::Char('q') => return self.quit(),
             _ => {}
         }
         false
@@ -576,7 +623,10 @@ impl Screen for Menu {
         let card = center(area, area.width.min(112), area.height.min(36));
         f.render_widget(Clear, card);
         let kind = if self.install.node { "node" } else { "panel" };
-        let keys: &[(&str, &str)] = if self.prompt.is_some() {
+        let refused = self.denied.is_some_and(|t| t.elapsed() < Duration::from_secs(4)) && self.busy();
+        let keys: &[(&str, &str)] = if refused {
+            &[("wait", "an operation is running: closing now would stop it half way")]
+        } else if self.prompt.is_some() {
             &[("enter", "confirm"), ("esc", "cancel")]
         } else if !self.inside {
             &[("↑↓", "section"), ("enter", "open"), ("q", "quit")]
@@ -732,7 +782,7 @@ impl Menu {
             let on = self.install.env.get("MIKAN_AUTO_UPDATE") == Some("1");
             format!("{}   a to switch", if on { "on" } else { "off" })
         } else {
-            let on = std::fs::read_to_string(format!("{}/policy.json", ops::UPDATE_DIR)).is_ok_and(|t| t.contains("true"));
+            let on = self.policy_on;
             format!("{}   switched in the panel's settings", if on { "on" } else { "off" })
         };
         lines.push(Line::from(""));

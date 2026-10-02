@@ -1,6 +1,7 @@
 package nodeapi
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -18,10 +19,15 @@ import (
 type Client struct {
 	hc   *http.Client
 	base string
+	// dial opens a bare connection to the Node API, for Tunnel.
+	dial func(ctx context.Context) (net.Conn, error)
 }
 
 func NewUnixClient(socket string) *Client {
-	return &Client{base: "http://node", hc: &http.Client{Transport: &http.Transport{
+	dial := func(ctx context.Context) (net.Conn, error) {
+		return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "unix", socket)
+	}
+	return &Client{base: "http://node", dial: dial, hc: &http.Client{Transport: &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "unix", socket)
 		},
@@ -31,7 +37,14 @@ func NewUnixClient(socket string) *Client {
 
 // NewTLSClient reaches a remote node at host:port; cfg pins both sides (see nodetls).
 func NewTLSClient(address string, cfg *tls.Config) *Client {
-	return &Client{base: "https://" + address, hc: &http.Client{Transport: &http.Transport{
+	// A tunnel takes over the connection, which HTTP/2 does not allow.
+	h1 := cfg.Clone()
+	h1.NextProtos = []string{"http/1.1"}
+	dial := func(ctx context.Context) (net.Conn, error) {
+		d := tls.Dialer{NetDialer: &net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}, Config: h1}
+		return d.DialContext(ctx, "tcp", address)
+	}
+	return &Client{base: "https://" + address, dial: dial, hc: &http.Client{Transport: &http.Transport{
 		DialContext:         (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 		TLSClientConfig:     cfg,
 		TLSHandshakeTimeout: 5 * time.Second,
@@ -40,9 +53,6 @@ func NewTLSClient(address string, cfg *tls.Config) *Client {
 		IdleConnTimeout:     90 * time.Second,
 	}}}
 }
-
-// CloseIdle drops kept-alive connections, e.g. when the node's address changes.
-func (c *Client) CloseIdle() { c.hc.CloseIdleConnections() }
 
 var ErrUnavailable = errors.New("node unavailable")
 
@@ -77,9 +87,34 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any, timeo
 		return fmt.Errorf("node %s %s: status %d", method, path, resp.StatusCode)
 	}
 	if out != nil {
-		return json.NewDecoder(resp.Body).Decode(out)
+		return json.NewDecoder(&cappedReader{r: resp.Body, left: MaxResponse}).Decode(out)
 	}
 	return nil
+}
+
+// MaxResponse bounds what the panel reads from a node in one answer: the biggest real one
+// (the counters of thousands of slots) is a few MiB. A node is a server somebody else may
+// run, and one that streams JSON for ever must not take the panel's memory.
+const MaxResponse = 8 << 20
+
+// ErrTooLarge is a node's answer past MaxResponse.
+var ErrTooLarge = errors.New("node answer too large")
+
+type cappedReader struct {
+	r    io.Reader
+	left int64
+}
+
+func (c *cappedReader) Read(p []byte) (int, error) {
+	if c.left <= 0 {
+		return 0, ErrTooLarge
+	}
+	if int64(len(p)) > c.left {
+		p = p[:c.left]
+	}
+	n, err := c.r.Read(p)
+	c.left -= int64(n)
+	return n, err
 }
 
 func (c *Client) Apply(ctx context.Context, s DesiredState) (ApplyResult, error) {
@@ -95,10 +130,6 @@ func (c *Client) Validate(ctx context.Context, req ValidateRequest) error {
 
 func (c *Client) SetPolicies(ctx context.Context, epoch string, p []Policy) error {
 	return c.do(ctx, http.MethodPut, "/v1/policies", PoliciesRequest{Epoch: epoch, Policies: p}, nil, 30*time.Second)
-}
-
-func (c *Client) Kick(ctx context.Context, slots []string) error {
-	return c.do(ctx, http.MethodPost, "/v1/kick", KickRequest{Slots: slots}, nil, 10*time.Second)
 }
 
 func (c *Client) Counters(ctx context.Context) (Counters, error) {
@@ -136,15 +167,65 @@ func (c *Client) ScanTargets(ctx context.Context, req TargetScanRequest) (Target
 	return r, err
 }
 
-func (c *Client) Logs(ctx context.Context, since time.Time) ([]LogLine, error) {
-	var r []LogLine
-	err := c.do(ctx, http.MethodGet, "/v1/logs?since="+url.QueryEscape(since.Format(time.RFC3339Nano)), nil, &r, 5*time.Second)
-	return r, err
-}
-
 // Warp checks the node's way out through WARP (a request to Cloudflare through it).
 func (c *Client) Warp(ctx context.Context) (WarpStatus, error) {
 	var r WarpStatus
 	err := c.do(ctx, http.MethodGet, "/v1/warp", nil, &r, 20*time.Second)
 	return r, err
 }
+
+// Probe checks the internet through one outbound of the node: WARP or NODE-<id>.
+func (c *Client) Probe(ctx context.Context, proxy string) (ProbeResult, error) {
+	var r ProbeResult
+	err := c.do(ctx, http.MethodGet, "/v1/probe?proxy="+url.QueryEscape(proxy), nil, &r, 20*time.Second)
+	return r, err
+}
+
+// TunnelHosts are what a node opens a tunnel to: the Bot API, for a panel whose own
+// server cannot reach Telegram. Nothing else, so a node is no open proxy.
+var TunnelHosts = []string{"api.telegram.org:443"}
+
+// Tunnel opens a TCP stream to addr through the node (HTTP CONNECT on the Node API).
+func (c *Client) Tunnel(ctx context.Context, addr string) (net.Conn, error) {
+	conn, err := c.dial(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+	if d, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(d)
+	} else {
+		_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
+	}
+	req := &http.Request{Method: http.MethodConnect, URL: &url.URL{Host: addr}, Host: addr, Header: http.Header{}}
+	if err := req.Write(conn); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, req)
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		defer conn.Close()
+		var e Error
+		if json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&e) == nil && e.Code != "" {
+			return nil, &e
+		}
+		return nil, fmt.Errorf("node tunnel: status %d", resp.StatusCode)
+	}
+	_ = conn.SetDeadline(time.Time{})
+	if br.Buffered() > 0 {
+		return &bufConn{Conn: conn, r: br}, nil
+	}
+	return conn, nil
+}
+
+// bufConn reads what the CONNECT response left buffered before the connection itself.
+type bufConn struct {
+	net.Conn
+	r *bufio.Reader
+}
+
+func (c *bufConn) Read(p []byte) (int, error) { return c.r.Read(p) }

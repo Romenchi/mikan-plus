@@ -2,11 +2,12 @@ package proto
 
 import (
 	"net/url"
+	"strings"
 	"testing"
 )
 
 // The inbound's own fingerprint wins over the panel's default, which wins over chrome; an
-// unknown value saved before the panel checked them never reaches apps.
+// own value must have the shape of a profile name, or it never reaches apps.
 func TestFingerprintPrecedence(t *testing.T) {
 	priv, _ := realityKey(t)
 	base := "type: vless\nreality-config:\n  dest: www.microsoft.com:443\n  private-key: " + priv + "\n  short-id: [a1b2]\n  server-names: [www.microsoft.com]\n"
@@ -14,8 +15,9 @@ func TestFingerprintPrecedence(t *testing.T) {
 		{"", "", "chrome"},
 		{"", "firefox", "firefox"},
 		{"safari", "firefox", "safari"},
-		{"chrome_psk", "ios", "ios"}, // unknown own value: the default
-		{"", "netscape", "chrome"},   // unknown default: chrome
+		{"chrome120", "ios", "chrome120"}, // an own value of the right shape is used
+		{"Chrome 1,2", "ios", "ios"},      // a malformed one never reaches apps: the default
+		{"", "bad value!", "chrome"},      // a malformed default: chrome
 		{"randomized", "", "randomized"},
 	}
 	for _, c := range cases {
@@ -74,8 +76,14 @@ func TestSetFingerprint(t *testing.T) {
 	if got := mustParse(t, Marshal(tpl)).Ext().Client.Fingerprint; got != "ios" {
 		t.Fatalf("set: %q\n%s", got, Marshal(tpl))
 	}
-	if code(SetFingerprint(tpl, "chrome120")) != "config_fingerprint" || code(SetFingerprint(tpl, "ios\nx: 1")) != "config_fingerprint" {
-		t.Fatal("unknown fingerprints must be refused")
+	for _, bad := range []string{"Chrome", "ios\nx: 1", "a,DIRECT", "chrome 120", strings.Repeat("a", 33)} {
+		if code(SetFingerprint(tpl, bad)) != "config_fingerprint" {
+			t.Fatalf("%q: malformed fingerprints must be refused", bad)
+		}
+	}
+	// An own value of the right shape is the admin's call.
+	if err := SetFingerprint(tpl, "randomizednoalpn"); err != nil {
+		t.Fatal(err)
 	}
 	// Clearing drops the empty sections, other overrides stay.
 	if err := SetFingerprint(tpl, ""); err != nil {

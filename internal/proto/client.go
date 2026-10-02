@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"net"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
+
+	"mikan/internal/hostname"
 )
 
 // ClientInput is what a subscription knows about one user and the node.
@@ -31,8 +34,18 @@ var Fingerprints = []string{"chrome", "firefox", "safari", "ios", "android", "ed
 // DefaultFingerprint is what clients get when neither the inbound nor the panel picks one.
 const DefaultFingerprint = "chrome"
 
-// ValidFingerprint says whether s is one of Fingerprints.
-func ValidFingerprint(s string) bool { return slices.Contains(Fingerprints, s) }
+// KnownFingerprint says whether s is one of Fingerprints.
+func KnownFingerprint(s string) bool { return slices.Contains(Fingerprints, s) }
+
+// fingerprintPattern is the shape of an own fingerprint the admin types: a uTLS profile
+// name of mihomo or Xray that the list leaves out (chrome120, randomizednoalpn, …).
+// Nothing else fits, so the value cannot break a link or a profile.
+var fingerprintPattern = regexp.MustCompile(`^[a-z0-9_]{1,32}$`)
+
+// ValidFingerprint says whether s may be used: one of Fingerprints or an own one of the
+// right shape. An own one is the admin's call: an app that does not know it may refuse
+// the link (Xray) or connect without uTLS (mihomo).
+func ValidFingerprint(s string) bool { return KnownFingerprint(s) || fingerprintPattern.MatchString(s) }
 
 // UsesFingerprint says whether clients of t dial through uTLS, so a fingerprint applies.
 func UsesFingerprint(t Template) bool {
@@ -51,10 +64,44 @@ func SetFingerprint(t Template, fp string) error {
 	if fp != "" && !ValidFingerprint(fp) {
 		return fail("config_fingerprint", extKey+".client.fingerprint")
 	}
+	setClient(t, "fingerprint", fp)
+	return nil
+}
+
+// ClientSNI says whether clients of t send a TLS name the admin may change: the node
+// certificate's protocols. A REALITY client sends the target's name, which the node
+// checks against server-names, so another name would not get through.
+func ClientSNI(t Template) bool {
+	return t.section("reality-config") == nil && (rules[t.Type()].cert || t.Ext().TLS == "node")
+}
+
+// SetClientEndpoint writes where clients connect when it is not the node itself, e.g. a
+// TCP proxy (nginx stream, HAProxy) in front of an inbound on 127.0.0.1. An empty server
+// or SNI, or port 0, removes that override: the node's address, the inbound's port and
+// the usual TLS name apply again.
+func SetClientEndpoint(t Template, server string, port int, sni string) error {
+	switch {
+	case server != "" && !hostname.Valid(server):
+		return fail("config_client_server", extKey+".client.server")
+	case port < 0 || port > 65535:
+		return fail("config_client_port", extKey+".client.port")
+	case sni != "" && (!hostname.Name(sni) || !ClientSNI(t)):
+		return fail("config_client_sni", extKey+".client.sni")
+	}
+	setClient(t, "server", server)
+	setClient(t, "port", port)
+	setClient(t, "sni", sni)
+	return nil
+}
+
+// setClient writes one key of mikan.client; an empty value removes it, and with it the
+// sections it leaves empty.
+func setClient(t Template, key string, v any) {
+	unset := v == "" || v == 0
 	ext, _ := t[extKey].(map[string]any)
 	if ext == nil {
-		if fp == "" {
-			return nil
+		if unset {
+			return
 		}
 		ext = map[string]any{}
 		t[extKey] = ext
@@ -63,10 +110,10 @@ func SetFingerprint(t Template, fp string) error {
 	if client == nil {
 		client = map[string]any{}
 	}
-	if fp == "" {
-		delete(client, "fingerprint")
+	if unset {
+		delete(client, key)
 	} else {
-		client["fingerprint"] = fp
+		client[key] = v
 	}
 	switch {
 	case len(client) > 0:
@@ -77,7 +124,6 @@ func SetFingerprint(t Template, fp string) error {
 	if len(ext) == 0 {
 		delete(t, extKey)
 	}
-	return nil
 }
 
 // Client is one proxy in both subscription formats.
@@ -125,8 +171,8 @@ type clientBuilder struct {
 
 func (c *clientBuilder) addr() string { return net.JoinHostPort(c.host, strconv.Itoa(c.port)) }
 
-// fingerprint: the inbound's own choice, then the panel's default. A value saved before
-// the panel checked them falls through rather than reaching apps that refuse it.
+// fingerprint: the inbound's own choice, then the panel's default. A malformed value saved
+// before the panel checked them falls through rather than reaching the apps.
 func (c *clientBuilder) fingerprint() string {
 	for _, fp := range []string{c.ext.Client.Fingerprint, c.in.Fingerprint} {
 		if ValidFingerprint(fp) {
@@ -283,7 +329,8 @@ func (c *clientBuilder) finish() (Client, error) {
 		if alpn := strings1(c.t["alpn"]); len(alpn) > 0 {
 			c.y["alpn"] = alpn
 		}
-		if c.in.PortSpec != "" && c.in.PortSpec != strconv.Itoa(c.in.Port) {
+		// A port of the inbound's own (a proxy in front) replaces the node's hopping range.
+		if c.in.PortSpec != "" && c.in.PortSpec != strconv.Itoa(c.in.Port) && c.port == c.in.Port {
 			c.y["ports"] = c.in.PortSpec
 			c.q.Set("mport", c.in.PortSpec)
 		}
@@ -291,6 +338,12 @@ func (c *clientBuilder) finish() (Client, error) {
 			c.y["obfs"], c.y["obfs-password"] = obfs, c.t.str("obfs-password")
 			c.q.Set("obfs", obfs)
 			c.q.Set("obfs-password", c.t.str("obfs-password"))
+			// Gecko's sizes are the sender's own; the client gets the server's.
+			for _, key := range []string{"obfs-min-packet-size", "obfs-max-packet-size"} {
+				if n, ok := toInt(c.t[key]); ok {
+					c.y[key] = n
+				}
+			}
 		}
 		return Client{c.y, "hysteria2://" + url.PathEscape(s.Secret) + "@" + c.addr() + "/?" + c.q.Encode() + "#" + name}, nil
 	case "tuic":

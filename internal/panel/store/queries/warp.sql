@@ -16,7 +16,7 @@ UPDATE node_warp SET enabled = ?, routes = ?, updated_at = ? WHERE node_id = ?;
 -- name: SetNodeWarpPlus :exec
 UPDATE node_warp SET plus = ?, updated_at = ? WHERE node_id = ?;
 
--- name: DeleteNodeWarp :exec
+-- name: DeleteNodeWarp :execrows
 DELETE FROM node_warp WHERE node_id = ?;
 
 -- name: SetInboundOutbound :exec

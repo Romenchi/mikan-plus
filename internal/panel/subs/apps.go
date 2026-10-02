@@ -117,6 +117,11 @@ var mihomoSince = map[string]Version{
 
 var mihomoNewTypes = map[string]bool{"mieru": true, "sudoku": true, "trusttunnel": true, "shadowquic": true}
 
+// geckoSince is the first mihomo with Hysteria2's Gecko obfuscation. Xray and sing-box
+// got it later than the apps on them can be told apart, so only mihomo apps that name
+// their core get a Gecko inbound.
+var geckoSince = Version{1, 19, 26}
+
 // Supports says whether the app can use an inbound.
 func (a App) Supports(n proto.Needs) bool {
 	switch a.Family {
@@ -131,14 +136,21 @@ func (a App) Supports(n proto.Needs) bool {
 		if known && (n.Transport == "xhttp" && !a.Core.AtLeast(Version{1, 19, 22}) || n.Encryption && !a.Core.AtLeast(Version{1, 19, 13})) {
 			return false
 		}
+		// An older core fails the whole profile on an obfs it does not know.
+		if n.Gecko && !(known && a.Core.AtLeast(geckoSince)) {
+			return false
+		}
 		return true
 	case FamilyXray: // no TUIC, AnyTLS or the mihomo-only types in Xray
+		if n.Gecko {
+			return false
+		}
 		switch n.Type {
 		case "vless", "vmess", "trojan", "hysteria2", "shadowsocks":
 			return true
 		}
-	case FamilySingBox: // no XHTTP and no VLESS Encryption in sing-box
-		if n.Transport == "xhttp" || n.Encryption {
+	case FamilySingBox: // no XHTTP, VLESS Encryption or Gecko in sing-box
+		if n.Transport == "xhttp" || n.Encryption || n.Gecko {
 			return false
 		}
 		switch n.Type {
@@ -148,11 +160,17 @@ func (a App) Supports(n proto.Needs) bool {
 			return !a.Legacy
 		}
 	case FamilyStash:
+		if n.Gecko {
+			return false
+		}
 		switch n.Type {
 		case "vless", "vmess", "trojan", "hysteria2", "tuic", "anytls", "shadowsocks", "snell":
 			return true
 		}
 	default: // what a share link can carry
+		if n.Gecko {
+			return false
+		}
 		switch n.Type {
 		case "vless", "vmess", "trojan", "hysteria2", "tuic", "anytls", "shadowsocks":
 			return true

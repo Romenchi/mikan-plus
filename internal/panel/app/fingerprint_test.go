@@ -56,10 +56,14 @@ func TestFingerprintSettingsAndInbound(t *testing.T) {
 	if resp.StatusCode != http.StatusOK || json.Unmarshal(body, &s) != nil || s.Fingerprint != "chrome" {
 		t.Fatalf("default: %d %s", resp.StatusCode, body)
 	}
-	for _, bad := range []string{"chrome120", "", "Chrome", "firefox\n"} {
+	for _, bad := range []string{"Chrome 120", "", "Chrome", "firefox\n", "a,DIRECT"} {
 		if resp, body := h.do(http.MethodPatch, api+"/settings", map[string]any{"client_fingerprint": bad}, csrf); resp.StatusCode != http.StatusUnprocessableEntity {
 			t.Fatalf("%q accepted: %d %s", bad, resp.StatusCode, body)
 		}
+	}
+	// An own value of the right shape is the admin's call.
+	if resp, body := h.do(http.MethodPatch, api+"/settings", map[string]any{"client_fingerprint": "chrome120"}, csrf); resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"client_fingerprint":"chrome120"`) {
+		t.Fatalf("own value: %d %s", resp.StatusCode, body)
 	}
 	resp, body = h.do(http.MethodPatch, api+"/settings", map[string]any{"client_fingerprint": "firefox"}, csrf)
 	if resp.StatusCode != http.StatusOK || json.Unmarshal(body, &s) != nil || s.Fingerprint != "firefox" {
@@ -90,9 +94,9 @@ func TestFingerprintSettingsAndInbound(t *testing.T) {
 		id   string
 		body map[string]any
 	}{
-		{xhttp, map[string]any{"fingerprint": "chrome_psk"}},
+		{xhttp, map[string]any{"fingerprint": "Chrome PSK"}},
 		{hy2, map[string]any{"fingerprint": "ios"}}, // QUIC: no uTLS
-		{xhttp, map[string]any{"config": strings.Replace(view.Config, "fingerprint: ios", "fingerprint: netscape", 1)}},
+		{xhttp, map[string]any{"config": strings.Replace(view.Config, "fingerprint: ios", "fingerprint: Netscape", 1)}},
 	} {
 		if resp, body := h.do(http.MethodPatch, api+"/inbounds/"+c.id, c.body, csrf); resp.StatusCode != http.StatusUnprocessableEntity {
 			t.Fatalf("%v accepted: %d %s", c.body, resp.StatusCode, body)

@@ -9,6 +9,10 @@
 //	autotune:       with the node's 443/tcp dropped for the client (the blocker container), keep
 //	                checking every proxy like a url-test group until the panel moves XHTTP
 //	autotune-check: the client on the new profile gets through XHTTP again
+//	pools:          VLESS Vision counts to a 4 MiB traffic pool: its bytes go there, not to the
+//	                main quota; past the limit the node cuts it while XHTTP keeps going
+//	cascade:        VLESS Vision of the panel's node leaves through node2: the target sees node2's
+//	                address, the user is charged once, node2 off means no way out, not a leak
 package main
 
 import (
@@ -144,6 +148,10 @@ func main() {
 		devices()
 	case "devices-check":
 		devicesCheck()
+	case "pools":
+		pools()
+	case "cascade":
+		cascade()
 	case "autotune":
 		autotune()
 	case "autotune-check":
@@ -155,7 +163,8 @@ func prepare() {
 	p := login()
 	waitNode(p, 4)
 	for _, in := range []map[string]any{
-		{"preset": "vless_reality_grpc"},
+		// Its default port, 2053, is the panel's here, and the panel's node shares its host.
+		{"preset": "vless_reality_grpc", "port": "3053"},
 		{"preset": "trojan_reality"},
 		{"preset": "anytls"},
 		{"preset": "vless_reality_xhttp_pq"},
@@ -193,7 +202,7 @@ func prepare() {
 	var u user
 	p.call("POST", "/api/v1/users", map[string]any{"name": "Slice User", "tariff_id": tariffID}, &u)
 	log.Printf("created user %d, subscription %s", u.ID, u.SubURL)
-	if !strings.HasPrefix(u.SubURL, "https://node:2053/slicesub0000/") {
+	if !strings.HasPrefix(u.SubURL, "https://node.test:2053/slicesub0000/") {
 		log.Fatalf("unexpected sub_url %q", u.SubURL)
 	}
 	token := u.SubURL[strings.LastIndex(u.SubURL, "/")+1:]
@@ -634,4 +643,224 @@ func waitRemote(p *panel) {
 		time.Sleep(time.Second)
 	}
 	log.Fatal("the remote node did not come up")
+}
+
+// whoami asks the target which address the connection through proxy port came from.
+func whoami(port int) (string, error) {
+	d, _ := proxy.SOCKS5("tcp", net.JoinHostPort("client", strconv.Itoa(port)), nil, &net.Dialer{Timeout: 10 * time.Second})
+	c, err := d.Dial("tcp", "target:9000")
+	if err != nil {
+		return "", err
+	}
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(15 * time.Second))
+	if _, err := c.Write([]byte{'W', 0, 0, 0, 0, 0, 0, 0, 0}); err != nil {
+		return "", err
+	}
+	raw, err := io.ReadAll(c)
+	if err == nil && len(raw) == 0 {
+		err = fmt.Errorf("no answer")
+	}
+	return string(raw), err
+}
+
+// cascade sends the local Vision inbound out through node2 and back.
+func cascade() {
+	p := login()
+	raw, _ := os.ReadFile("/work/user")
+	uid, _ := strconv.ParseInt(string(raw), 10, 64)
+	var nodes []struct {
+		ID    int64 `json:"id"`
+		Local bool  `json:"local"`
+	}
+	p.call("GET", "/api/v1/nodes", nil, &nodes)
+	var remote int64
+	for _, n := range nodes {
+		if !n.Local {
+			remote = n.ID
+		}
+	}
+	var ins []struct {
+		ID     int64  `json:"id"`
+		NodeID int64  `json:"node_id"`
+		Preset string `json:"preset"`
+	}
+	p.call("GET", "/api/v1/inbounds", nil, &ins)
+	var vision int64
+	for _, in := range ins {
+		if in.Preset == "vless_reality_vision" && in.NodeID != remote {
+			vision = in.ID
+		}
+	}
+	addrOf := func(host string) string {
+		ips, err := net.LookupHost(host)
+		if err != nil || len(ips) == 0 {
+			log.Fatalf("resolve %s: %v", host, err)
+		}
+		return ips[0]
+	}
+	nodeIP, node2IP := addrOf("node"), addrOf("node2.slice")
+	const port = 11001 // VLESS Vision in the client
+	waitFor := func(want string) {
+		deadline := time.Now().Add(30 * time.Second)
+		var got string
+		var err error
+		for time.Now().Before(deadline) {
+			if got, err = whoami(port); err == nil && got == want {
+				return
+			}
+			time.Sleep(time.Second)
+		}
+		log.Fatalf("cascade: the target saw %q (%v), want %s", got, err, want)
+	}
+	waitFor(nodeIP)
+	log.Printf("direct: the target sees node %s", nodeIP)
+
+	path := "/api/v1/inbounds/" + strconv.FormatInt(vision, 10)
+	p.call("PATCH", path, map[string]any{"outbound": "node", "exit_node_id": remote}, nil)
+	waitFor(node2IP)
+	log.Printf("cascade: the target sees node2 %s", node2IP)
+
+	var before, after user
+	p.call("GET", "/api/v1/users/"+strconv.FormatInt(uid, 10), nil, &before)
+	const each = 8 * mib
+	if _, err := download(port, each); err != nil {
+		log.Fatalf("cascade download: %v", err)
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		p.call("GET", "/api/v1/users/"+strconv.FormatInt(uid, 10), nil, &after)
+		if after.UsedDown-before.UsedDown >= each {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	got := after.UsedDown - before.UsedDown
+	if diff := float64(got-each) / float64(each); diff < -0.01 || diff > 0.01 {
+		log.Fatalf("cascade: the user was charged %d for %d (once, at the first node)", got, each)
+	}
+	log.Printf("cascade: charged %d for %d", got, each)
+
+	// node2 off: its relay stops, and the first node must not fall back to going direct.
+	p.call("PATCH", "/api/v1/nodes/"+strconv.FormatInt(remote, 10), map[string]any{"enabled": false}, nil)
+	deadline = time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := whoami(port); err != nil {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	if ip, err := whoami(port); err == nil {
+		log.Fatalf("cascade: with node2 off the traffic still got out, from %s", ip)
+	}
+	log.Print("cascade: node2 off, no way out")
+	p.call("PATCH", "/api/v1/nodes/"+strconv.FormatInt(remote, 10), map[string]any{"enabled": true}, nil)
+	waitFor(node2IP)
+	p.call("PATCH", path, map[string]any{"outbound": "direct"}, nil)
+	waitFor(nodeIP)
+	log.Print("CASCADE OK")
+}
+
+// pools puts the local VLESS Vision into a traffic pool with a small limit.
+func pools() {
+	p := login()
+	raw, _ := os.ReadFile("/work/user")
+	uid, _ := strconv.ParseInt(string(raw), 10, 64)
+	userPath := "/api/v1/users/" + strconv.FormatInt(uid, 10)
+	var nodes []struct {
+		ID    int64 `json:"id"`
+		Local bool  `json:"local"`
+	}
+	p.call("GET", "/api/v1/nodes", nil, &nodes)
+	var local int64
+	for _, n := range nodes {
+		if n.Local {
+			local = n.ID
+		}
+	}
+	var ins []struct {
+		ID     int64  `json:"id"`
+		NodeID int64  `json:"node_id"`
+		Preset string `json:"preset"`
+	}
+	p.call("GET", "/api/v1/inbounds", nil, &ins)
+	var vision int64
+	for _, in := range ins {
+		if in.Preset == "vless_reality_vision" && in.NodeID == local {
+			vision = in.ID
+		}
+	}
+	var pool struct {
+		ID int64 `json:"id"`
+	}
+	p.call("POST", "/api/v1/pools", map[string]any{"name": "WL"}, &pool)
+	p.call("PATCH", "/api/v1/inbounds/"+strconv.FormatInt(vision, 10), map[string]any{"pool_id": pool.ID}, nil)
+	const limit = 4 * mib
+	p.call("PUT", userPath+"/pools", map[string]any{"pools": []map[string]any{{"pool_id": pool.ID, "traffic_limit": limit}}}, nil)
+
+	const visionPort, xhttpPort = 11001, 11002
+	usage := func() (main, inPool int64) {
+		var u user
+		p.call("GET", userPath, nil, &u)
+		var ps []struct {
+			PoolID   int64 `json:"pool_id"`
+			UsedUp   int64 `json:"used_up"`
+			UsedDown int64 `json:"used_down"`
+		}
+		p.call("GET", userPath+"/pools", nil, &ps)
+		for _, x := range ps {
+			if x.PoolID == pool.ID {
+				inPool = x.UsedUp + x.UsedDown
+			}
+		}
+		return u.UsedUp + u.UsedDown, inPool
+	}
+	settle := func(check func(main, inPool int64) bool) (int64, int64) {
+		deadline := time.Now().Add(20 * time.Second)
+		var m, pl int64
+		for time.Now().Before(deadline) {
+			if m, pl = usage(); check(m, pl) {
+				break
+			}
+			time.Sleep(time.Second)
+		}
+		return m, pl
+	}
+	// The node learns the pool with its next state; wait until Vision counts there.
+	time.Sleep(3 * time.Second)
+	main0, pool0 := usage()
+	if _, err := download(visionPort, 2*mib); err != nil {
+		log.Fatalf("pools: vision download: %v", err)
+	}
+	main1, pool1 := settle(func(_, pl int64) bool { return pl-pool0 >= 2*mib })
+	if pool1-pool0 < 2*mib || main1-main0 > 1024 {
+		log.Fatalf("pools: 2 MiB through Vision went to the pool %d and the main quota %d", pool1-pool0, main1-main0)
+	}
+	log.Printf("pools: 2 MiB through Vision counted to the pool (%d), main +%d", pool1-pool0, main1-main0)
+
+	// Past the limit the node cuts the pool mid-download.
+	if n, err := download(visionPort, 16*mib); err == nil {
+		log.Fatalf("pools: a 16 MiB download through a 4 MiB pool finished (%d bytes)", n)
+	}
+	if _, err := download(visionPort, mib); err == nil {
+		log.Fatal("pools: the used-up pool still lets Vision in")
+	}
+	log.Print("pools: past 4 MiB the pool is cut")
+	// The rest keeps working and counts to the main quota.
+	if _, err := download(xhttpPort, 2*mib); err != nil {
+		log.Fatalf("pools: XHTTP outside the pool stopped too: %v", err)
+	}
+	main2, _ := settle(func(m, _ int64) bool { return m-main1 >= 2*mib })
+	if main2-main1 < 2*mib {
+		log.Fatalf("pools: XHTTP's 2 MiB did not reach the main quota (%d)", main2-main1)
+	}
+	log.Printf("pools: XHTTP still works, main +%d", main2-main1)
+
+	// Clean up for the next phases: Vision back to the main traffic.
+	p.call("DELETE", "/api/v1/pools/"+strconv.FormatInt(pool.ID, 10), nil, nil)
+	time.Sleep(3 * time.Second)
+	if _, err := download(visionPort, mib); err != nil {
+		log.Fatalf("pools: Vision without the pool: %v", err)
+	}
+	log.Print("POOLS OK")
 }

@@ -27,6 +27,9 @@ export function CreateUserDrawer({ open, onOpenChange, onCreated }: { open: bool
     // Reset only when the drawer opens; `create` changes identity on every render.
   }, [open]);
 
+  // Preselects the second tariff: of the ones a new panel starts with (Trial, Standard,
+  // Unlimited) the usual choice for a customer is Standard, not the 3-day trial. With one
+  // tariff only, that one.
   useEffect(() => {
     if (tariffId === undefined && tariffs.data?.length) setTariffId(tariffs.data[Math.min(1, tariffs.data.length - 1)]!.id);
   }, [tariffs.data, tariffId]);

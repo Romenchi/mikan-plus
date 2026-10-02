@@ -56,6 +56,16 @@ func TestParse(t *testing.T) {
 	}
 }
 
+// A later release may add a field to the manifest; the panels out there must still read it.
+func TestParseIgnoresUnknownFields(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	data := []byte(strings.Replace(string(manifest(t)), `"version"`, `"channel":"beta","version"`, 1))
+	m, err := Parse(data, Sign(data, priv), pub)
+	if err != nil || m.Version != "0.3.9" {
+		t.Fatalf("a manifest with a new field: %+v, %v", m, err)
+	}
+}
+
 func TestEmbeddedKey(t *testing.T) {
 	if _, err := Key(PublicKey); err != nil {
 		t.Fatalf("the embedded release key: %v", err)

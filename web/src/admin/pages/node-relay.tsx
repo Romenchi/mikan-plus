@@ -3,8 +3,9 @@ import { Trash2, Zap } from "lucide-react";
 import { useEffect, useState } from "react";
 import { errorText } from "../../api/client";
 import { Drawer } from "../../components/overlay";
+import { Switch } from "../../components/switch";
 import { useToast } from "../../components/toast";
-import { Button, ErrorState, Field, Skeleton, Switch } from "../../components/ui";
+import { Button, ErrorState, Field, Skeleton } from "../../components/ui";
 
 export interface RelayData {
   configured: boolean;

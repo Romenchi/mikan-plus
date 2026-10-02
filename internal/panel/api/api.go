@@ -4,10 +4,8 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"net"
 	"net/http"
-	"net/url"
-	"strings"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -17,17 +15,21 @@ import (
 	"mikan/internal/nodeapi"
 	"mikan/internal/nodetls"
 	"mikan/internal/panel/acme"
+	"mikan/internal/panel/addons"
 	"mikan/internal/panel/audit"
 	"mikan/internal/panel/auth"
 	"mikan/internal/panel/autotune"
 	"mikan/internal/panel/billing"
+	"mikan/internal/panel/dnscheck"
 	"mikan/internal/panel/domain"
 	"mikan/internal/panel/nodesync"
 	"mikan/internal/panel/secure"
+	"mikan/internal/panel/server"
 	"mikan/internal/panel/settings"
 	"mikan/internal/panel/store"
 	"mikan/internal/panel/store/db"
 	"mikan/internal/panel/tgbot"
+	"mikan/internal/panel/tlscert"
 	"mikan/internal/panel/updates"
 	"mikan/internal/panel/warp"
 )
@@ -45,10 +47,11 @@ type Deps struct {
 	Now        func() time.Time
 
 	Users     *domain.Users
+	Inbounds  *domain.Inbounds
 	Devices   *domain.Devices
+	Packages  *domain.Packages
 	Pool      *domain.Pool
 	Changes   domain.Changes
-	SubURL    func(ctx context.Context, token string) string
 	Online    func() map[string]nodeapi.Online
 	Cert      func() acme.Status
 	RenewCert func()
@@ -67,8 +70,28 @@ type Deps struct {
 	// Warp registers WARP accounts with Cloudflare.
 	Warp    warp.Client
 	SubBase func(ctx context.Context) string
+	// SubPort opens subscriptions on a port of their own (0: closes it); SubPortError says
+	// why the saved one is not served. nil: the panel runs no server (tests).
+	SubPort      func(port int) error
+	SubPortError func() string
+	// SetCert installs the admin's own certificate for the panel, ClearCert goes back to
+	// Let's Encrypt; nil in development.
+	SetCert   func(ctx context.Context, certPEM, keyPEM []byte) error
+	ClearCert func() error
+	// NodeCerts keeps the nodes' own certificates; nil: nodes cannot have one.
+	NodeCerts *tlscert.NodeStore
+	// ForgetNode removes the certificates and keys kept on disk for a node id; nil: none.
+	ForgetNode func(id int64) error
 	// Updates knows the newest release and talks to the host updater; nil in tests.
 	Updates *updates.Checker
+	// Addons are the marketplace's payment adapters; nil in tests.
+	Addons *addons.Manager
+	// Resolve looks a name up for what the panel dials on the admin's word (a REALITY
+	// target); nil asks the system's resolver.
+	Resolve func(ctx context.Context, host string) ([]netip.Addr, error)
+	// DNS checks that a domain leads to the panel's or the node's server; nil: unchecked
+	// (tests, development).
+	DNS *dnscheck.Checker
 }
 
 // NodeRuntime is what the API needs from the running nodes.
@@ -83,6 +106,8 @@ type NodeRuntime interface {
 	ScanTargets(ctx context.Context, id int64, req nodeapi.TargetScanRequest) (nodeapi.TargetScan, error)
 	// Warp checks the node's way out through WARP.
 	Warp(ctx context.Context, id int64) (nodeapi.WarpStatus, error)
+	// Probe checks the internet through one outbound of a node (NODE-<id> of a cascade).
+	Probe(ctx context.Context, id int64, proxy string) (nodeapi.ProbeResult, error)
 }
 
 type ctxKey int
@@ -98,6 +123,8 @@ type handlers struct {
 	d         Deps
 	api       huma.API
 	dummyHash string
+	// hashSem bounds the password hashes that run at once (see verifyPassword).
+	hashSem chan struct{}
 
 	pendingMu sync.Mutex
 	pending   map[int64]pendingTOTP
@@ -115,8 +142,8 @@ func Config(version string) huma.Config {
 	cfg.SchemasPath = ""
 	cfg.CreateHooks = nil
 	cfg.Info.Description = "REST API панели mikan. Все пути — под секретным адресом админки: https://<панель>/<секретный путь>/api/v1/…\n\n" +
-		"Скрипты и интеграции авторизуются ключом API (Настройки → Ключи API): заголовок `Authorization: Bearer mk_…`. " +
-		"Ключ «чтение» выполняет только GET, «полный» — всё, кроме входа, сессий и самих ключей.\n\n" +
+		"Скрипты и интеграции авторизуются ключом API (Настройки → API): заголовок `Authorization: Bearer mk_…`. " +
+		"Ключ «чтение» выполняет только GET и не получает ссылок подписок и секретных адресов; «полный» меняет данные, кроме входа, сессий, самих ключей и операций, где уходят деньги, ключи и адреса клиентов (они помечены «только сессия»).\n\n" +
 		"Админка в браузере ходит с cookie сессии; изменяющие запросы тогда требуют заголовок `X-CSRF-Token` из `GET /auth/me`.\n\n" +
 		"Ошибки — RFC 9457 (application/problem+json): `detail` — код ошибки, `errors[].message` — код по полю."
 	cfg.Components.SecuritySchemes = map[string]*huma.SecurityScheme{
@@ -154,7 +181,7 @@ func New(d Deps) (http.Handler, huma.API, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	h := &handlers{d: d, api: api, dummyHash: dummy, pending: map[int64]pendingTOTP{}}
+	h := &handlers{d: d, api: api, dummyHash: dummy, hashSem: make(chan struct{}, 4), pending: map[int64]pendingTOTP{}}
 	api.UseMiddleware(h.middleware)
 	h.registerAuth()
 	h.registerUsers()
@@ -163,13 +190,19 @@ func New(d Deps) (http.Handler, huma.API, error) {
 	h.registerTargets()
 	h.registerStats()
 	h.registerSettings()
+	h.registerCerts()
 	h.registerTelegram()
 	h.registerUpdates()
 	h.registerNodes()
 	h.registerAPIKeys()
 	h.registerPayments()
+	h.registerAddons()
 	h.registerWarp()
 	h.registerRelay()
+	h.registerCascade()
+	h.registerPools()
+	h.registerPackages()
+	h.registerAudit()
 	return noStore(mux), api, nil
 }
 
@@ -181,7 +214,7 @@ func noStore(next http.Handler) http.Handler {
 }
 
 func (h *handlers) middleware(ctx huma.Context, next func(huma.Context)) {
-	ctx = huma.WithValue(ctx, keyClient, client{IP: h.clientIP(ctx), UserAgent: ctx.Header("User-Agent")})
+	ctx = huma.WithValue(ctx, keyClient, client{IP: server.ClientIP(http.Header{"X-Forwarded-For": {ctx.Header("X-Forwarded-For")}}, ctx.RemoteAddr(), h.d.TrustProxy), UserAgent: ctx.Header("User-Agent")})
 	op := ctx.Operation()
 	mutating := op.Method != http.MethodGet && op.Method != http.MethodHead
 	if mutating && !sameOrigin(ctx) {
@@ -221,35 +254,8 @@ func (h *handlers) middleware(ctx huma.Context, next func(huma.Context)) {
 // sameOrigin rejects cross-site browser requests. Non-browser clients send neither
 // Sec-Fetch-Site nor Origin; they still need the CSRF header for authenticated calls.
 func sameOrigin(ctx huma.Context) bool {
-	switch ctx.Header("Sec-Fetch-Site") {
-	case "same-origin", "none":
-		return true
-	case "":
-	default:
-		return false
-	}
-	origin := ctx.Header("Origin")
-	if origin == "" {
-		return true
-	}
-	u, err := url.Parse(origin)
-	return err == nil && u.Host == ctx.Host()
-}
-
-func (h *handlers) clientIP(ctx huma.Context) string {
-	if h.d.TrustProxy {
-		if xff := ctx.Header("X-Forwarded-For"); xff != "" {
-			parts := strings.Split(xff, ",")
-			if ip := strings.TrimSpace(parts[len(parts)-1]); net.ParseIP(ip) != nil {
-				return ip
-			}
-		}
-	}
-	host, _, err := net.SplitHostPort(ctx.RemoteAddr())
-	if err != nil {
-		return ctx.RemoteAddr()
-	}
-	return host
+	h := http.Header{"Sec-Fetch-Site": {ctx.Header("Sec-Fetch-Site")}, "Origin": {ctx.Header("Origin")}}
+	return server.FetchSite(h, ctx.Host()) != server.SiteCross
 }
 
 func clientOf(ctx context.Context) client {

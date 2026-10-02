@@ -57,7 +57,7 @@ func newSink(t *testing.T) (*sink, *Client) {
 	s := &sink{}
 	srv := httptest.NewServer(s)
 	t.Cleanup(srv.Close)
-	return s, NewClient(srv.URL, "1:x")
+	return s, NewClient(srv.URL, "1:x", nil)
 }
 
 func say(chat int64, text string) func(context.Context, *Client) error {

@@ -206,6 +206,7 @@ type Needs struct {
 	Type       string // listener type
 	Transport  string // vless, vmess, trojan: tcp, xhttp, grpc or ws
 	Encryption bool   // VLESS Encryption (post-quantum)
+	Gecko      bool   // Hysteria2 with Gecko obfuscation
 }
 
 // NeedsOf describes a template for choosing which apps get it.
@@ -216,5 +217,6 @@ func NeedsOf(t Template) Needs {
 		n.Transport = transport(t)
 	}
 	n.Encryption = n.Type == "vless" && t.hasEncryption()
+	n.Gecko = n.Type == "hysteria2" && t.str("obfs") == ObfsGecko
 	return n
 }

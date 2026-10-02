@@ -332,31 +332,16 @@ func (q *Queries) ListAudit(ctx context.Context, arg ListAuditParams) ([]AuditLo
 	return items, nil
 }
 
-const listSettings = `-- name: ListSettings :many
-SELECT key, value FROM settings ORDER BY key
+const pruneAudit = `-- name: PruneAudit :execrows
+DELETE FROM audit_log WHERE ts < ?
 `
 
-func (q *Queries) ListSettings(ctx context.Context) ([]Setting, error) {
-	rows, err := q.db.QueryContext(ctx, listSettings)
+func (q *Queries) PruneAudit(ctx context.Context, ts int64) (int64, error) {
+	result, err := q.db.ExecContext(ctx, pruneAudit, ts)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	defer rows.Close()
-	items := []Setting{}
-	for rows.Next() {
-		var i Setting
-		if err := rows.Scan(&i.Key, &i.Value); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
+	return result.RowsAffected()
 }
 
 const setAdminLastLogin = `-- name: SetAdminLastLogin :exec
@@ -384,20 +369,6 @@ type SetAdminPasswordParams struct {
 
 func (q *Queries) SetAdminPassword(ctx context.Context, arg SetAdminPasswordParams) error {
 	_, err := q.db.ExecContext(ctx, setAdminPassword, arg.PasswordHash, arg.ID)
-	return err
-}
-
-const setAdminRecoveryCodes = `-- name: SetAdminRecoveryCodes :exec
-UPDATE admins SET recovery_codes = ? WHERE id = ?
-`
-
-type SetAdminRecoveryCodesParams struct {
-	RecoveryCodes sql.NullString
-	ID            int64
-}
-
-func (q *Queries) SetAdminRecoveryCodes(ctx context.Context, arg SetAdminRecoveryCodesParams) error {
-	_, err := q.db.ExecContext(ctx, setAdminRecoveryCodes, arg.RecoveryCodes, arg.ID)
 	return err
 }
 
@@ -429,6 +400,26 @@ type SetSettingParams struct {
 func (q *Queries) SetSetting(ctx context.Context, arg SetSettingParams) error {
 	_, err := q.db.ExecContext(ctx, setSetting, arg.Key, arg.Value)
 	return err
+}
+
+const spendAdminRecoveryCodes = `-- name: SpendAdminRecoveryCodes :execrows
+UPDATE admins SET recovery_codes = ?1 WHERE id = ?2 AND recovery_codes = ?3
+`
+
+type SpendAdminRecoveryCodesParams struct {
+	Rest sql.NullString
+	ID   int64
+	Was  sql.NullString
+}
+
+// Takes a recovery code out of the list it was found in: 0 rows means another login spent
+// a code from the same list first, and this one is refused.
+func (q *Queries) SpendAdminRecoveryCodes(ctx context.Context, arg SpendAdminRecoveryCodesParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, spendAdminRecoveryCodes, arg.Rest, arg.ID, arg.Was)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const touchSession = `-- name: TouchSession :exec

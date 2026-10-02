@@ -40,15 +40,15 @@ var checking sync.Mutex
 func (h *handlers) registerUpdates() {
 	tags := []string{"settings"}
 	huma.Register(h.api, huma.Operation{OperationID: "get-updates", Method: http.MethodGet, Path: "/api/v1/updates", Summary: "Обновления", Tags: tags}, h.getUpdates)
-	huma.Register(h.api, huma.Operation{OperationID: "update-updates", Method: http.MethodPatch, Path: "/api/v1/updates", Summary: "Включить или выключить автообновление", Tags: tags}, h.patchUpdates)
+	huma.Register(h.api, huma.Operation{OperationID: "update-updates", Metadata: sessionOnly, Extensions: sessionOnlyExt, Method: http.MethodPatch, Path: "/api/v1/updates", Summary: "Включить или выключить автообновление", Tags: tags}, h.patchUpdates)
 	huma.Register(h.api, huma.Operation{OperationID: "check-updates", Method: http.MethodPost, Path: "/api/v1/updates/check", Summary: "Проверить обновления сейчас", Tags: tags}, h.checkUpdates)
-	huma.Register(h.api, huma.Operation{OperationID: "request-update", Method: http.MethodPost, Path: "/api/v1/updates/request", Summary: "Обновить сейчас: заявка серверу", Tags: tags, DefaultStatus: http.StatusAccepted}, h.requestUpdate)
+	huma.Register(h.api, huma.Operation{OperationID: "request-update", Metadata: sessionOnly, Extensions: sessionOnlyExt, Method: http.MethodPost, Path: "/api/v1/updates/request", Summary: "Обновить сейчас: заявка серверу", Tags: tags, DefaultStatus: http.StatusAccepted}, h.requestUpdate)
 }
 
 func (h *handlers) updatesView(ctx context.Context) (UpdatesView, error) {
 	v := UpdatesView{Current: h.d.Version, Notes: map[string]string{}}
 	var err error
-	if v.Auto, err = h.d.Settings.Bool(ctx, settings.KeyAutoUpdate, false); err != nil {
+	if v.Auto, err = h.d.Settings.On(ctx, settings.AutoUpdate); err != nil {
 		return v, err
 	}
 	u := h.d.Updates

@@ -72,13 +72,16 @@ func (q *Queries) AddUserTraffic(ctx context.Context, arg AddUserTrafficParams) 
 	return err
 }
 
-const archiveTariff = `-- name: ArchiveTariff :exec
+const archiveTariff = `-- name: ArchiveTariff :execrows
 UPDATE tariffs SET archived = 1 WHERE id = ?
 `
 
-func (q *Queries) ArchiveTariff(ctx context.Context, id int64) error {
-	_, err := q.db.ExecContext(ctx, archiveTariff, id)
-	return err
+func (q *Queries) ArchiveTariff(ctx context.Context, id int64) (int64, error) {
+	result, err := q.db.ExecContext(ctx, archiveTariff, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const burnSlot = `-- name: BurnSlot :exec
@@ -141,7 +144,7 @@ func (q *Queries) CountTariffs(ctx context.Context) (int64, error) {
 const createInbound = `-- name: CreateInbound :one
 INSERT INTO inbounds (node_id, name, preset, port, enabled, settings, config, created_at, updated_at)
 VALUES (?, ?, ?, ?, 1, '{}', ?, ?, ?)
-RETURNING id, node_id, name, preset, port, enabled, settings, created_at, updated_at, display_name, config, auto_port, auto_sni, outbound
+RETURNING id, node_id, name, preset, port, enabled, settings, created_at, updated_at, display_name, config, auto_port, auto_sni, outbound, exit_node_id, pool_id, listen
 `
 
 type CreateInboundParams struct {
@@ -180,6 +183,9 @@ func (q *Queries) CreateInbound(ctx context.Context, arg CreateInboundParams) (I
 		&i.AutoPort,
 		&i.AutoSni,
 		&i.Outbound,
+		&i.ExitNodeID,
+		&i.PoolID,
+		&i.Listen,
 	)
 	return i, err
 }
@@ -354,7 +360,7 @@ func (q *Queries) DeleteUser(ctx context.Context, id int64) error {
 }
 
 const getInbound = `-- name: GetInbound :one
-SELECT id, node_id, name, preset, port, enabled, settings, created_at, updated_at, display_name, config, auto_port, auto_sni, outbound FROM inbounds WHERE id = ?
+SELECT id, node_id, name, preset, port, enabled, settings, created_at, updated_at, display_name, config, auto_port, auto_sni, outbound, exit_node_id, pool_id, listen FROM inbounds WHERE id = ?
 `
 
 func (q *Queries) GetInbound(ctx context.Context, id int64) (Inbound, error) {
@@ -375,6 +381,9 @@ func (q *Queries) GetInbound(ctx context.Context, id int64) (Inbound, error) {
 		&i.AutoPort,
 		&i.AutoSni,
 		&i.Outbound,
+		&i.ExitNodeID,
+		&i.PoolID,
+		&i.Listen,
 	)
 	return i, err
 }
@@ -530,8 +539,41 @@ func (q *Queries) InsertSlot(ctx context.Context, arg InsertSlotParams) error {
 	return err
 }
 
+const listBoundDeviceSlots = `-- name: ListBoundDeviceSlots :many
+SELECT d.id AS device_id, s.name AS slot_name FROM bound_devices d JOIN slots s ON s.id = d.slot_id WHERE d.user_id = ?
+`
+
+type ListBoundDeviceSlotsRow struct {
+	DeviceID int64
+	SlotName string
+}
+
+// The names of the slots of a user's bound devices, by device id.
+func (q *Queries) ListBoundDeviceSlots(ctx context.Context, userID int64) ([]ListBoundDeviceSlotsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listBoundDeviceSlots, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListBoundDeviceSlotsRow{}
+	for rows.Next() {
+		var i ListBoundDeviceSlotsRow
+		if err := rows.Scan(&i.DeviceID, &i.SlotName); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listInbounds = `-- name: ListInbounds :many
-SELECT id, node_id, name, preset, port, enabled, settings, created_at, updated_at, display_name, config, auto_port, auto_sni, outbound FROM inbounds ORDER BY id
+SELECT id, node_id, name, preset, port, enabled, settings, created_at, updated_at, display_name, config, auto_port, auto_sni, outbound, exit_node_id, pool_id, listen FROM inbounds ORDER BY id
 `
 
 func (q *Queries) ListInbounds(ctx context.Context) ([]Inbound, error) {
@@ -558,6 +600,54 @@ func (q *Queries) ListInbounds(ctx context.Context) ([]Inbound, error) {
 			&i.AutoPort,
 			&i.AutoSni,
 			&i.Outbound,
+			&i.ExitNodeID,
+			&i.PoolID,
+			&i.Listen,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listNodeInbounds = `-- name: ListNodeInbounds :many
+SELECT id, node_id, name, preset, port, enabled, settings, created_at, updated_at, display_name, config, auto_port, auto_sni, outbound, exit_node_id, pool_id, listen FROM inbounds WHERE node_id = ? ORDER BY id
+`
+
+func (q *Queries) ListNodeInbounds(ctx context.Context, nodeID int64) ([]Inbound, error) {
+	rows, err := q.db.QueryContext(ctx, listNodeInbounds, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Inbound{}
+	for rows.Next() {
+		var i Inbound
+		if err := rows.Scan(
+			&i.ID,
+			&i.NodeID,
+			&i.Name,
+			&i.Preset,
+			&i.Port,
+			&i.Enabled,
+			&i.Settings,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.DisplayName,
+			&i.Config,
+			&i.AutoPort,
+			&i.AutoSni,
+			&i.Outbound,
+			&i.ExitNodeID,
+			&i.PoolID,
+			&i.Listen,
 		); err != nil {
 			return nil, err
 		}
@@ -685,7 +775,7 @@ func (q *Queries) ListTariffs(ctx context.Context) ([]Tariff, error) {
 }
 
 const listUserDevices = `-- name: ListUserDevices :many
-SELECT user_id, ip, first_seen, last_seen, client FROM devices WHERE user_id = ? ORDER BY last_seen DESC
+SELECT user_id, ip, first_seen, last_seen FROM devices WHERE user_id = ? ORDER BY last_seen DESC
 `
 
 func (q *Queries) ListUserDevices(ctx context.Context, userID int64) ([]Device, error) {
@@ -702,11 +792,40 @@ func (q *Queries) ListUserDevices(ctx context.Context, userID int64) ([]Device, 
 			&i.Ip,
 			&i.FirstSeen,
 			&i.LastSeen,
-			&i.Client,
 		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUserSlots = `-- name: ListUserSlots :many
+SELECT s.name FROM slots s JOIN users u ON u.slot_id = s.id WHERE u.id = ?1
+UNION
+SELECT s.name FROM slots s JOIN bound_devices d ON d.slot_id = s.id WHERE d.user_id = ?1
+`
+
+// The same for one user: what an answer about a single user needs, not the whole table.
+func (q *Queries) ListUserSlots(ctx context.Context, userID int64) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, listUserSlots, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		items = append(items, name)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -790,6 +909,15 @@ func (q *Queries) PruneDevices(ctx context.Context, lastSeen int64) error {
 	return err
 }
 
+const pruneTrafficDaily = `-- name: PruneTrafficDaily :exec
+DELETE FROM traffic_daily WHERE day < ?
+`
+
+func (q *Queries) PruneTrafficDaily(ctx context.Context, day int64) error {
+	_, err := q.db.ExecContext(ctx, pruneTrafficDaily, day)
+	return err
+}
+
 const pruneTrafficHourly = `-- name: PruneTrafficHourly :exec
 DELETE FROM traffic_hourly WHERE hour < ?
 `
@@ -811,21 +939,6 @@ type ResetUserTrafficParams struct {
 
 func (q *Queries) ResetUserTraffic(ctx context.Context, arg ResetUserTrafficParams) error {
 	_, err := q.db.ExecContext(ctx, resetUserTraffic, arg.PeriodStart, arg.UpdatedAt, arg.ID)
-	return err
-}
-
-const setDeviceClient = `-- name: SetDeviceClient :exec
-UPDATE devices SET client = ? WHERE user_id = ? AND ip = ?
-`
-
-type SetDeviceClientParams struct {
-	Client string
-	UserID int64
-	Ip     string
-}
-
-func (q *Queries) SetDeviceClient(ctx context.Context, arg SetDeviceClientParams) error {
-	_, err := q.db.ExecContext(ctx, setDeviceClient, arg.Client, arg.UserID, arg.Ip)
 	return err
 }
 
@@ -855,6 +968,15 @@ type SetNodeStateParams struct {
 
 func (q *Queries) SetNodeState(ctx context.Context, arg SetNodeStateParams) error {
 	_, err := q.db.ExecContext(ctx, setNodeState, arg.Key, arg.Value)
+	return err
+}
+
+const setSlotCounter = `-- name: SetSlotCounter :exec
+INSERT INTO slot_counter (id, last) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET last = excluded.last
+`
+
+func (q *Queries) SetSlotCounter(ctx context.Context, last int64) error {
+	_, err := q.db.ExecContext(ctx, setSlotCounter, last)
 	return err
 }
 
@@ -891,6 +1013,18 @@ type SetUserOnlineParams struct {
 func (q *Queries) SetUserOnline(ctx context.Context, arg SetUserOnlineParams) error {
 	_, err := q.db.ExecContext(ctx, setUserOnline, arg.OnlineAt, arg.ID)
 	return err
+}
+
+const slotCounter = `-- name: SlotCounter :one
+SELECT last FROM slot_counter WHERE id = 1
+`
+
+// The last slot number handed out: slots purged from the top do not give theirs back.
+func (q *Queries) SlotCounter(ctx context.Context) (int64, error) {
+	row := q.db.QueryRowContext(ctx, slotCounter)
+	var last int64
+	err := row.Scan(&last)
+	return last, err
 }
 
 const takeFreeSlot = `-- name: TakeFreeSlot :one
@@ -1024,7 +1158,7 @@ func (q *Queries) TotalTrafficHourly(ctx context.Context, hour int64) ([]TotalTr
 }
 
 const updateInbound = `-- name: UpdateInbound :one
-UPDATE inbounds SET port = ?, enabled = ?, config = ?, display_name = ?, updated_at = ? WHERE id = ? RETURNING id, node_id, name, preset, port, enabled, settings, created_at, updated_at, display_name, config, auto_port, auto_sni, outbound
+UPDATE inbounds SET port = ?, enabled = ?, config = ?, display_name = ?, updated_at = ? WHERE id = ? RETURNING id, node_id, name, preset, port, enabled, settings, created_at, updated_at, display_name, config, auto_port, auto_sni, outbound, exit_node_id, pool_id, listen
 `
 
 type UpdateInboundParams struct {
@@ -1061,6 +1195,9 @@ func (q *Queries) UpdateInbound(ctx context.Context, arg UpdateInboundParams) (I
 		&i.AutoPort,
 		&i.AutoSni,
 		&i.Outbound,
+		&i.ExitNodeID,
+		&i.PoolID,
+		&i.Listen,
 	)
 	return i, err
 }

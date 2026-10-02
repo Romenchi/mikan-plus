@@ -1,16 +1,15 @@
 package autotune
 
 import (
-	"os"
 	"reflect"
-	"regexp"
 	"slices"
-	"strconv"
-	"strings"
 	"testing"
 	"time"
 
 	"mikan/internal/nodeapi"
+	"mikan/internal/panel/domain"
+	"mikan/internal/panel/presets"
+	"mikan/internal/panel/settings"
 	"mikan/internal/panel/store/db"
 )
 
@@ -190,35 +189,49 @@ func TestCutOff(t *testing.T) {
 	}
 }
 
-// The node cannot open ports in the host's firewall: the installer opens the pool ahead.
-func TestInstallerOpensThePool(t *testing.T) {
-	raw, err := os.ReadFile("../../../installer/src/host.rs")
+// The seeded node 1 plus gRPC on 2053, a disabled Trojan on 2087, the subscription port
+// 2096 and a Hysteria2 hopping range over 5000-6500.
+func TestFreePorts(t *testing.T) {
+	e := setup(t)
+	if err := settings.Set(e.ctx, e.set, settings.KeySubPort, 2096); err != nil {
+		t.Fatal(err)
+	}
+	for _, in := range []db.CreateInboundParams{
+		{Name: "vless-grpc", Preset: "vless_reality_grpc", Port: "2053"},
+		{Name: "off", Preset: "trojan_reality", Port: "2087"},
+		{Name: "hopping", Preset: "hysteria2", Port: "5000-6500"},
+	} {
+		config, err := presets.NewConfig(in.Preset, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		in.NodeID, in.Config = 1, config
+		row, err := e.st.Q.CreateInbound(e.ctx, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if in.Name == "off" {
+			if _, err := e.st.Q.UpdateInbound(e.ctx, db.UpdateInboundParams{Port: row.Port, Config: row.Config, ID: row.ID}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	node, err := e.st.Q.GetNode(e.ctx, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := regexp.MustCompile(`POOL: \[u16; \d+\] = \[([0-9, ]+)\]`).FindSubmatch(raw)
-	if m == nil {
-		t.Fatal("the installer has no POOL")
+	ports, err := domain.NodePorts(e.ctx, e.st.Q, node)
+	if err != nil {
+		t.Fatal(err)
 	}
-	var want []string
-	for _, p := range Pool {
-		want = append(want, strconv.Itoa(p))
-	}
-	if got := strings.Fields(strings.ReplaceAll(string(m[1]), ",", " ")); !slices.Equal(got, want) {
-		t.Fatalf("the installer opens %v, the pool is %v", got, want)
-	}
-}
-
-func TestFreePorts(t *testing.T) {
-	ins := nodeInbounds()
-	ins = append(ins, db.Inbound{ID: 6, Name: "off", Preset: "trojan_reality", Port: "2087", Enabled: 0})
-	got := FreePorts(ins, "tcp", map[string]bool{"2096": true}, map[string]bool{"2443": true})
-	want := []string{"2083", "3443", "4443", "5443", "6443", "7443", "9443"} // 2053 gRPC, 2087 a disabled inbound, 8443 Vision
+	got := FreePorts(ports, "tcp", map[string]bool{"2443": true})
+	want := []string{"2083", "3443", "4443", "5443", "6443", "7443", "9443"} // 2053 gRPC, 2087 a disabled inbound, 2096 subscriptions, 8443 Vision
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("tcp: got %v, want %v", got, want)
 	}
-	// UDP: only TUIC's 8443 is taken there.
-	if got := FreePorts(ins, "udp", nil, nil); slices.Contains(got, "8443") || !slices.Contains(got, "2053") || len(got) != len(Pool)-1 {
-		t.Fatalf("udp: %v", got)
+	// UDP: TUIC's 8443 and the hopping range's 5443 and 6443 are taken there.
+	want = []string{"2053", "2083", "2087", "2096", "2443", "3443", "4443", "7443", "9443"}
+	if got := FreePorts(ports, "udp", nil); !reflect.DeepEqual(got, want) {
+		t.Fatalf("udp: got %v, want %v", got, want)
 	}
 }

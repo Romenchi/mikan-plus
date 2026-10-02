@@ -1,151 +1,90 @@
 import "../styles/app.css";
-import { Check, Copy, Laptop, Layers, LifeBuoy, QrCode, Send, Smartphone } from "lucide-react";
-import { motion } from "motion/react";
-import { StrictMode, useEffect, useState } from "react";
+import { Check, Copy, LifeBuoy, QrCode, Send } from "lucide-react";
+import { StrictMode, useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Atmosphere } from "../components/atmosphere";
+import { ErrorBoundary } from "../components/error-boundary";
 import { LangSwitch } from "../components/lang";
-import { Button, Pill, QR, Ring, Skeleton } from "../components/ui";
-import { t, useLocale } from "../i18n";
-import { ago, appName, bytes, dateLong, dateShort, days, daysUntil, time } from "../lib/format";
+import { Bar, Button, Pill, QR, Ring, Skeleton } from "../components/ui";
+import { initI18n, t, useLocale } from "../i18n";
+import { subDicts } from "../i18n/sub";
+import { bytes, dateLong, dateShort, days, daysUntil } from "../lib/format";
 import { initTheme } from "../lib/theme";
+import { safeHref } from "../lib/url";
+import { APPS, detect, enc, type Platform } from "./apps";
+import { Devices } from "./devices";
+import { initData, json, openOutside, outside, pageURL, request, subRoot, tgEvent, tgMode, tokenOf } from "./net";
 import { loadShop, Shop, type ShopData } from "./shop";
+import type { Info, TgSub } from "./types";
 
 initTheme();
 
-type Info = {
-  name: string;
-  brand: string;
-  support_url?: string;
-  state: "active" | "expiring" | "limited" | "expired" | "disabled";
-  used_up: number;
-  used_down: number;
-  limit?: number;
-  expires_at?: string;
-  resets_at?: string;
-  device_limit: number;
-  protocols: string[];
-  binding: boolean;
-  devices?: Device[];
-  unbind_after?: string;
-  telegram?: string;
-};
-
-type Device = { id: number; os: string; os_version: string; model: string; app: string; shared: boolean; created_at: string; last_seen: string };
-
-type Platform = "ios" | "android" | "windows" | "macos";
-
-// The same subscription URL serves the config to apps; the page only links to it. In
-// Telegram the page runs as the bot's Mini App at /<sub path>/tg: the subscription then
-// comes from Telegram's sign-in instead of the address.
-const pageURL = location.origin + location.pathname.replace(/\/$/, "");
-const tgMode = /\/tg$/.test(pageURL);
-const subRoot = pageURL.replace(/\/tg$/, "");
-// Telegram's launch data after the #: the Mini App's sign-in.
-const initData = new URLSearchParams(location.hash.slice(1)).get("tgWebAppData") ?? "";
-
-type TelegramProxy = { postEvent?: (type: string, data: string) => void };
-
-/** Telegram's Mini App bridge: to the app's web view, or to Telegram Web around the frame. */
-function tgEvent(type: string, data: Record<string, unknown> | "" = "") {
-  const w = window as Window & { TelegramWebviewProxy?: TelegramProxy };
-  if (w.TelegramWebviewProxy?.postEvent) w.TelegramWebviewProxy.postEvent(type, JSON.stringify(data));
-  else if (window.parent !== window) window.parent.postMessage(JSON.stringify({ eventType: type, eventData: data }), "https://web.telegram.org");
-}
-
-/** Opens a link outside the Mini App: Telegram links in Telegram, the rest in the browser. */
-function openOutside(url: string) {
-  const tme = /^https:\/\/t\.me(\/.*)$/.exec(url);
-  if (tme) tgEvent("web_app_open_tg_link", { path_full: tme[1] });
-  else tgEvent("web_app_open_link", { url });
-}
-
-/** In Telegram a link leaves the Mini App through the bridge; elsewhere it is a plain link. */
-function outside(url: string) {
-  return tgMode
-    ? {
-        onClick: (e: React.MouseEvent) => {
-          e.preventDefault();
-          openOutside(url);
-        },
-      }
-    : {};
-}
-
-type App = { name: string; note: "easiest" | "free" | "stable" | "openSource" | "modern" | "bestWindows" | "tun" | "oneButton"; link: (url: string, brand: string) => string };
-const enc = encodeURIComponent;
-const clash = (url: string, brand: string) => `clash://install-config?url=${enc(url)}&name=${enc(brand)}`;
-const APPS: Record<Platform, App[]> = {
-  ios: [
-    { name: "Happ", note: "easiest", link: (u) => `happ://add/${u}` },
-    { name: "Streisand", note: "free", link: (u, b) => `streisand://import/${u}#${enc(b)}` },
-    { name: "v2RayTun", note: "stable", link: (u) => `v2raytun://import/${u}` },
-  ],
-  android: [
-    { name: "Happ", note: "easiest", link: (u) => `happ://add/${u}` },
-    { name: "INCY", note: "modern", link: (u) => `incy://add/${u}` },
-    { name: "v2RayTun", note: "stable", link: (u) => `v2raytun://import/${u}` },
-    { name: "Hiddify", note: "openSource", link: (u, b) => `hiddify://import/${u}#${enc(b)}` },
-  ],
-  windows: [
-    { name: "Koala Clash", note: "bestWindows", link: (u, b) => `koala-clash://install-config?url=${enc(u)}&name=${enc(b)}` },
-    { name: "Hiddify", note: "easiest", link: (u, b) => `hiddify://import/${u}#${enc(b)}` },
-    { name: "Clash Verge Rev", note: "tun", link: clash },
-  ],
-  macos: [
-    { name: "Clash Verge Rev", note: "tun", link: clash },
-    { name: "Happ", note: "oneButton", link: (u) => `happ://add/${u}` },
-    { name: "Hiddify", note: "openSource", link: (u, b) => `hiddify://import/${u}#${enc(b)}` },
-  ],
-};
-
-function detect(): Platform {
-  const ua = navigator.userAgent;
-  if (/iPhone|iPad|iPod/.test(ua)) return "ios";
-  if (/Android/.test(ua)) return "android";
-  if (/Mac OS X/.test(ua)) return "macos";
-  if (/Windows/.test(ua)) return "windows";
-  return "android";
-}
-
-type TgSub = { token: string; name: string };
+/** Pauses between the reloads after a payment: the panel applies a paid one within seconds. */
+const AFTER_PAYMENT_MS = [2_000, 5_000, 10_000];
 
 function SubPage() {
-  const [info, setInfo] = useState<Info | null>(null);
-  const [failed, setFailed] = useState(false);
+  // Texts are read at render time: follow a language switch without remounting the page
+  // (a remount would sign in to the Mini App and fetch everything again).
+  useLocale();
+  // The info that came for one subscription's address; it is shown only while that address
+  // is the one on screen, so a late answer of another subscription never takes its place.
+  const [info, setInfo] = useState<{ url: string; data: Info } | null>(null);
+  const [failedURL, setFailedURL] = useState<string | null>(null);
   const [platform, setPlatform] = useState<Platform>(detect);
   const [qr, setQr] = useState(false);
   const [copied, setCopied] = useState(false);
   const [subURL, setSubURL] = useState(tgMode ? "" : pageURL);
   const [tg, setTg] = useState<{ state: "loading" | "none" | "failed" | "ok"; subs: TgSub[] }>({ state: tgMode ? "loading" : "ok", subs: [] });
   const [shop, setShop] = useState<ShopData | null>(null);
+  const [packages, setPackages] = useState<{ token: string; data: ShopData } | null>(null);
+  const current = info && info.url === subURL ? info.data : null;
+  const failed = !current && failedURL === subURL;
 
-  const load = (url = subURL) =>
-    fetch(url + "/info", { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
-      .then((d: Info) => {
-        setInfo(d);
-        document.title = d.brand;
-      });
+  const loadInfo = useCallback(async (url: string, signal?: AbortSignal) => {
+    const d = await request(url + "/info", { signal }).then((r) => json<Info>(r));
+    setInfo({ url, data: d });
+    setFailedURL(null);
+    document.title = d.brand;
+  }, []);
 
   // The Mini App signs in with the launch data Telegram puts after the #.
-  const session = () =>
-    fetch(subRoot + "/tg/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ init_data: initData }), cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
-      .then((d: { subs: TgSub[] }) => {
-        if (d.subs.length === 0) {
-          setTg({ state: "none", subs: [] });
-          return;
-        }
-        setTg({ state: "ok", subs: d.subs });
-        // A new subscription bought here shows at once; the one on screen stays otherwise.
-        setSubURL((cur) => (cur && d.subs.some((s) => cur.endsWith("/" + s.token)) ? cur : subRoot + "/" + d.subs[0]!.token));
-      })
-      .catch(() => setTg({ state: "failed", subs: [] }));
+  const session = useCallback(
+    () =>
+      request(subRoot + "/tg/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ init_data: initData }) })
+        .then((r) => json<{ subs: TgSub[] }>(r))
+        .then((d) => {
+          if (d.subs.length === 0) {
+            setTg({ state: "none", subs: [] });
+            return;
+          }
+          setTg({ state: "ok", subs: d.subs });
+          // A new subscription bought here shows at once; the one on screen stays otherwise.
+          setSubURL((cur) => (cur && d.subs.some((s) => cur.endsWith("/" + s.token)) ? cur : subRoot + "/" + d.subs[0]!.token));
+        })
+        // A refresh that fails leaves what is on screen; only a first sign-in shows the error.
+        .catch(() => setTg((cur) => (cur.state === "ok" && cur.subs.length ? cur : { state: "failed", subs: [] }))),
+    [],
+  );
+
+  const token = tokenOf(subURL);
+  // What a refresh reloads: the session, the subscription's info and the shop.
   const refresh = () => {
     void session();
-    if (subURL) void load(subURL).catch(() => undefined);
+    if (subURL) void loadInfo(subURL).catch(() => undefined);
+    if (tgMode) {
+      loadShop(subRoot, initData)
+        .then(setShop)
+        .catch(() => undefined);
+      if (subURL) {
+        loadShop(subRoot, initData, token)
+          .then((data) => setPackages({ token, data }))
+          .catch(() => undefined);
+      }
+    }
   };
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+
   useEffect(() => {
     if (!tgMode) return;
     tgEvent("web_app_ready");
@@ -154,17 +93,17 @@ function SubPage() {
     loadShop(subRoot, initData)
       .then(setShop)
       .catch(() => setShop(null));
-  }, []);
+  }, [session]);
 
   // Telegram tells the Mini App when its payment sheet closes; a paid one is applied by
-  // the panel within seconds.
+  // the panel within seconds, so the page reloads a few times, a little later each time.
   useEffect(() => {
     if (!tgMode) return;
-    let timer = 0;
+    let timers: number[] = [];
     const onEvent = (type: string, data: unknown) => {
       if (type === "invoice_closed" && (data as { status?: string } | null)?.status === "paid") {
-        window.clearTimeout(timer);
-        timer = window.setTimeout(refresh, 2000);
+        timers.forEach((id) => window.clearTimeout(id));
+        timers = AFTER_PAYMENT_MS.map((ms) => window.setTimeout(() => refreshRef.current(), ms));
       }
     };
     const w = window as Window & { Telegram?: { WebView?: { receiveEvent?: (type: string, data: unknown) => void } } };
@@ -187,29 +126,43 @@ function SubPage() {
     window.addEventListener("message", onMessage);
     return () => {
       window.removeEventListener("message", onMessage);
-      window.clearTimeout(timer);
+      timers.forEach((id) => window.clearTimeout(id));
       if (w.Telegram?.WebView) w.Telegram.WebView.receiveEvent = prev;
     };
-  }, [subURL]);
+  }, []);
 
-  const shopFor = (token: string, title: string) =>
-    shop && shop.offers.length > 0 ? (
-      <Shop data={shop} subRoot={subRoot} initData={initData} token={token} title={title} openInvoice={(slug) => tgEvent("web_app_open_invoice", { slug })} openLink={openOutside} onRefresh={refresh} />
-    ) : null;
-
+  // One subscription's info (and, in the Mini App, its traffic packages) at a time: a
+  // switch cancels what the previous one still waits for.
   useEffect(() => {
-    if (subURL) load(subURL).catch(() => setFailed(true));
-  }, [subURL]);
+    if (!subURL) return;
+    const ctl = new AbortController();
+    loadInfo(subURL, ctl.signal).catch(() => {
+      if (!ctl.signal.aborted) setFailedURL(subURL);
+    });
+    if (tgMode) {
+      const tok = tokenOf(subURL);
+      loadShop(subRoot, initData, tok)
+        .then((data) => !ctl.signal.aborted && setPackages({ token: tok, data }))
+        .catch(() => !ctl.signal.aborted && setPackages(null));
+    }
+    return () => ctl.abort();
+  }, [subURL, loadInfo]);
 
-  // The Mini App sends an app's "Add" to the browser as #open=<app>: open it right away.
+  // The Mini App sends an app's "Add" to the browser as #open=<app>: open it once, right
+  // away. The mark is dropped from the address, or a reload and every refresh of the info
+  // would ask the system to open the app again.
+  const launched = useRef(false);
   useEffect(() => {
+    if (tgMode || !current || launched.current) return;
     const want = new URLSearchParams(location.hash.slice(1)).get("open");
-    if (tgMode || !want || !info) return;
+    if (!want) return;
+    launched.current = true;
+    history.replaceState(null, "", location.pathname + location.search);
     const app = Object.values(APPS)
       .flat()
       .find((a) => a.name === want);
-    if (app) location.href = app.link(subURL, info.brand);
-  }, [info]);
+    if (app) location.href = app.link(subURL, current.brand);
+  }, [current, subURL]);
 
   const copy = async () => {
     try {
@@ -220,6 +173,39 @@ function SubPage() {
       setQr(true);
     }
   };
+
+  const shopFor = (shopToken: string, title: string) =>
+    shop && shop.offers.length > 0 ? (
+      <Shop
+        data={shop}
+        offers={shop.offers}
+        subRoot={subRoot}
+        initData={initData}
+        token={shopToken}
+        title={title}
+        openInvoice={(slug) => tgEvent("web_app_open_invoice", { slug })}
+        openLink={openOutside}
+        onRefresh={refresh}
+      />
+    ) : null;
+  // Traffic packages are for the subscription on screen.
+  const packagesShop =
+    packages && packages.data.packages?.length && packages.token === token ? (
+      <Shop
+        key={token}
+        data={packages.data}
+        offers={packages.data.packages}
+        field="package_id"
+        pick={t("sub.packagesPick")}
+        subRoot={subRoot}
+        initData={initData}
+        token={token}
+        title={t("sub.packages")}
+        openInvoice={(slug) => tgEvent("web_app_open_invoice", { slug })}
+        openLink={openOutside}
+        onRefresh={refresh}
+      />
+    ) : null;
 
   if (tg.state === "none" && shop?.allow_new && shop.offers.length > 0) {
     return (
@@ -235,9 +221,14 @@ function SubPage() {
   if (tg.state === "none" || tg.state === "failed") {
     return (
       <Shell>
-        <section className="glass rounded-3xl p-6 text-center">
+        <section className="glass rounded-3xl p-6 text-center" role={tg.state === "failed" ? "alert" : undefined}>
           <h1 className="font-display text-xl font-medium">{tg.state === "none" ? t("sub.tgNoSubTitle") : t("sub.loadFailed")}</h1>
           <p className="mt-2 text-[13px] text-[var(--ink-500)]">{tg.state === "none" ? t("sub.tgNoSubText") : t("sub.tgFailed")}</p>
+          {tg.state === "failed" ? (
+            <Button variant="primary" className="mt-4" onClick={() => void session()}>
+              {t("common.retry")}
+            </Button>
+          ) : null}
         </section>
       </Shell>
     );
@@ -245,14 +236,24 @@ function SubPage() {
   if (failed) {
     return (
       <Shell>
-        <section className="glass rounded-3xl p-6 text-center">
+        <section className="glass rounded-3xl p-6 text-center" role="alert">
           <h1 className="font-display text-xl font-medium">{t("sub.loadFailed")}</h1>
           <p className="mt-2 text-[13px] text-[var(--ink-500)]">{t("sub.loadFailedText")}</p>
+          <Button
+            variant="primary"
+            className="mt-4"
+            onClick={() => {
+              setFailedURL(null);
+              loadInfo(subURL).catch(() => setFailedURL(subURL));
+            }}
+          >
+            {t("common.retry")}
+          </Button>
         </section>
       </Shell>
     );
   }
-  if (!info) {
+  if (!current) {
     return (
       <Shell>
         {tgMode ? (
@@ -267,16 +268,23 @@ function SubPage() {
     );
   }
 
-  const used = info.used_up + info.used_down;
-  const left = info.limit != null ? Math.max(0, info.limit - used) : null;
-  const pct = info.limit ? (used / info.limit) * 100 : 0;
-  const d = info.expires_at ? daysUntil(info.expires_at) : null;
-  const firstName = info.name.split(/\s+/)[0] ?? "";
-  const tone = ({ active: "ok", expiring: "warn", limited: "bad", expired: "bad", disabled: "off" } as const)[info.state];
+  const used = current.used_up + current.used_down;
+  const extra = current.extra ?? 0;
+  // Traffic packages are spent after the tariff's traffic: they add to what is left.
+  const left = current.limit != null ? Math.max(0, current.limit - used) + extra : null;
+  const cap = current.limit != null ? Math.max(current.limit, used) + extra : 0;
+  const pct = cap ? (used / cap) * 100 : 0;
+  const ofTotal = (limit: number, more: number) => t("sub.of", { total: more > 0 ? t("sub.plusPackages", { limit: bytes(limit), extra: bytes(more) }) : bytes(limit) });
+  const d = current.expires_at ? daysUntil(current.expires_at) : null;
+  const firstName = current.name.split(/\s+/)[0] ?? "";
+  const tone = ({ active: "ok", expiring: "warn", limited: "bad", expired: "bad", disabled: "off" } as const)[current.state];
   const [leftValue, leftUnit] = left != null ? bytes(left).split(" ") : ["∞", ""];
+  // Links from the server are followed only when they are http(s) (or Telegram's own).
+  const support = safeHref(current.support_url, { tg: true });
+  const telegram = safeHref(current.telegram);
 
   return (
-    <Shell brand={info.brand}>
+    <Shell brand={current.brand}>
       {tg.subs.length > 1 ? (
         <div className="flex gap-1 overflow-x-auto rounded-[14px] bg-[var(--hover)] p-1" role="group" aria-label={t("sub.link")}>
           {tg.subs.map((s) => (
@@ -292,44 +300,63 @@ function SubPage() {
           ))}
         </div>
       ) : null}
-      <motion.section className="glass rounded-3xl p-4" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
-        <h1 className="font-display text-xl leading-7 font-medium tracking-tight">{t(`sub.status.${info.state}`, { name: firstName })}</h1>
+      <section className="glass reveal rounded-3xl p-4">
+        <h1 className="font-display text-xl leading-7 font-medium tracking-tight">{t(`sub.status.${current.state}`, { name: firstName })}</h1>
         <div className="mt-2 flex items-center justify-between gap-2 text-[13px] text-[var(--ink-600)]">
-          <span>{info.expires_at ? t("sub.until", { date: dateLong(info.expires_at) }) : t("sub.forever")}</span>
+          <span>{current.expires_at ? t("sub.until", { date: dateLong(current.expires_at) }) : t("sub.forever")}</span>
           {d !== null && d >= 0 ? <Pill tone={tone}>{days(d)}</Pill> : null}
         </div>
-        {(info.state === "expired" || info.state === "limited" || info.state === "disabled") && info.support_url && !(tgMode && shop?.offers.length) ? (
-          <a className="btn btn-primary btn-block mt-4" href={info.support_url} target="_blank" rel="noreferrer noopener" {...outside(info.support_url)}>
+        {(current.state === "expired" || current.state === "limited" || current.state === "disabled") && support && !(tgMode && shop?.offers.length) ? (
+          <a className="btn btn-primary btn-block mt-4" href={support} target="_blank" rel="noreferrer noopener" {...outside(support)}>
             {t("sub.renew")}
           </a>
         ) : null}
-      </motion.section>
+      </section>
 
-      {tgMode ? shopFor(subURL.slice(subURL.lastIndexOf("/") + 1), t("sub.shop")) : null}
+      {tgMode ? shopFor(token, t("sub.shop")) : null}
+      {tgMode ? packagesShop : null}
 
       <section className="glass grid grid-cols-[104px_1fr] items-center gap-4 rounded-3xl p-4">
-        <Ring size={104} pct={info.limit != null ? pct : 100} label={leftValue} sub={left != null ? t("sub.left", { unit: leftUnit ?? "" }) : t("users.unlimited")} />
+        <Ring size={104} pct={current.limit != null ? pct : 100} label={leftValue} sub={left != null ? t("sub.left", { unit: leftUnit ?? "" }) : t("sub.unlimited")} />
         <div className="flex flex-col gap-2 text-xs text-[var(--ink-500)]">
           <div>
-            {t("userDrawer.used")}
-            <b className="num block text-base font-medium text-[var(--ink-900)]">{info.limit != null ? `${bytes(used)} ${t("users.of", { total: bytes(info.limit) })}` : bytes(used)}</b>
+            {t("sub.used")}
+            <b className="num block text-base font-medium text-[var(--ink-900)]">{current.limit != null ? `${bytes(used)} ${ofTotal(current.limit, extra)}` : bytes(used)}</b>
           </div>
-          {info.resets_at ? (
+          {current.resets_at ? (
             <div>
               {t("sub.resets")}
-              <b className="block text-base font-medium text-[var(--ink-900)]">{dateShort(info.resets_at)}</b>
+              <b className="block text-base font-medium text-[var(--ink-900)]">{dateShort(current.resets_at)}</b>
             </div>
           ) : null}
-          {info.device_limit ? (
+          {current.device_limit ? (
             <div>
               {t("sub.devices")}
-              <b className="num block text-base font-medium text-[var(--ink-900)]">{t("sub.upTo", { n: info.device_limit })}</b>
+              <b className="num block text-base font-medium text-[var(--ink-900)]">{t("sub.upTo", { n: current.device_limit })}</b>
             </div>
           ) : null}
         </div>
       </section>
 
-      {info.binding || info.devices?.length ? <Devices info={info} subURL={subURL} reload={() => load()} /> : null}
+      {current.pools?.length ? (
+        <section className="glass rounded-3xl p-4">
+          <h2 className="mb-3 text-[15px] font-semibold">{t("sub.pools")}</h2>
+          <ul className="flex flex-col gap-3">
+            {current.pools.map((p) => (
+              <li key={p.name}>
+                <div className="mb-1 flex items-center justify-between gap-2 text-[13px]">
+                  <span className="font-medium">{p.name}</span>
+                  <span className="num text-xs text-[var(--ink-600)]">{p.limit != null ? `${bytes(p.used)} ${ofTotal(p.limit, p.extra ?? 0)}` : bytes(p.used)}</span>
+                </div>
+                {p.limit != null ? <Bar label={p.name} pct={Math.min(100, (p.used / (Math.max(p.limit, p.used) + (p.extra ?? 0))) * 100)} /> : null}
+                {p.limit != null && p.used >= p.limit && !p.extra ? <p className="mt-1 text-xs text-[var(--berry-600)]">{t("sub.poolOut")}</p> : null}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {current.binding || current.devices?.length ? <Devices info={current} subURL={subURL} reload={() => loadInfo(subURL).catch(() => undefined)} /> : null}
 
       <section className="glass rounded-3xl p-4">
         <h2 className="mb-3 text-[15px] font-semibold">{t("sub.connect")}</h2>
@@ -368,7 +395,7 @@ function SubPage() {
               </div>
               <a
                 className={i === 0 ? "btn btn-primary btn-sm" : "btn btn-glass btn-sm"}
-                href={a.link(subURL, info.brand)}
+                href={a.link(subURL, current.brand)}
                 title={tgMode ? t("sub.tgBrowser") : undefined}
                 {...outside(subURL + "#open=" + enc(a.name))}
               >
@@ -412,13 +439,13 @@ function SubPage() {
         ) : null}
       </section>
 
-      {info.telegram && !tgMode ? (
-        <a className="btn btn-glass btn-block h-12 rounded-2xl" href={info.telegram} target="_blank" rel="noreferrer noopener">
+      {telegram && !tgMode ? (
+        <a className="btn btn-glass btn-block h-12 rounded-2xl" href={telegram} target="_blank" rel="noreferrer noopener">
           <Send size={18} aria-hidden /> {t("sub.openTelegram")}
         </a>
       ) : null}
-      {info.support_url ? (
-        <a className="btn btn-glass btn-block h-12 rounded-2xl" href={info.support_url} target="_blank" rel="noreferrer noopener" {...outside(info.support_url)}>
+      {support ? (
+        <a className="btn btn-glass btn-block h-12 rounded-2xl" href={support} target="_blank" rel="noreferrer noopener" {...outside(support)}>
           <LifeBuoy size={18} aria-hidden /> {t("sub.support")}
         </a>
       ) : null}
@@ -426,111 +453,9 @@ function SubPage() {
   );
 }
 
-const desktopOS = /windows|mac|linux|darwin/i;
-
-function deviceName(d: Device): string {
-  if (d.shared) return t("sub.sharedPlace");
-  return d.model || [d.os, d.os_version].filter(Boolean).join(" ") || appName(d.app) || t("userDrawer.device");
-}
-
-/** The subscriber's own devices: each holds a place; one may be unbound a day. */
-function Devices({ info, subURL, reload }: { info: Info; subURL: string; reload: () => Promise<void> }) {
-  const [confirm, setConfirm] = useState<number | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const list = info.devices ?? [];
-  const full = info.device_limit > 0 && list.length >= info.device_limit;
-  const wait = info.unbind_after && new Date(info.unbind_after).getTime() > Date.now() ? info.unbind_after : "";
-
-  const unbind = async (id: number) => {
-    setBusy(true);
-    setError("");
-    try {
-      const r = await fetch(`${subURL}/devices/${id}/unbind`, { method: "POST", cache: "no-store" });
-      if (r.status === 429) {
-        const b = (await r.json().catch(() => ({}))) as { unbind_after?: string };
-        setError(b.unbind_after ? t("sub.unbindAfter", { date: dateShort(b.unbind_after), time: time(b.unbind_after) }) : t("sub.unbindFailed"));
-      } else if (!r.ok) {
-        setError(t("sub.unbindFailed"));
-      }
-      setConfirm(null);
-      await reload();
-    } catch {
-      setError(t("sub.unbindFailed"));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <section className="glass rounded-3xl p-4" aria-labelledby="devices-title">
-      <div className="mb-3 flex items-center justify-between gap-2">
-        <h2 id="devices-title" className="text-[15px] font-semibold">
-          {t("sub.devicesTitle")}
-        </h2>
-        {info.device_limit > 0 ? <Pill tone={full ? "warn" : "ok"}>{t("sub.devicesCount", { n: list.length, limit: info.device_limit })}</Pill> : null}
-      </div>
-      {full ? <p className="mb-3 rounded-2xl bg-[var(--hover)] p-3 text-[13px] text-[var(--ink-700)]">{t("sub.devicesFull")}</p> : null}
-      {list.length === 0 ? (
-        <p className="text-[13px] text-[var(--ink-500)]">{t("sub.devicesEmpty")}</p>
-      ) : (
-        <ul className="row-list">
-          {list.map((d) => {
-            const name = deviceName(d);
-            const system = !d.shared && d.model ? [d.os, d.os_version].filter(Boolean).join(" ") : "";
-            const meta = [system, appName(d.app)].filter(Boolean).join(" · ");
-            return (
-              <li key={d.id} className="py-2">
-                <div className="grid grid-cols-[40px_minmax(0,1fr)_auto] items-center gap-3">
-                  <span className="grid h-10 w-10 place-items-center rounded-xl border border-[var(--hairline)] bg-white text-[var(--ink-600)]" aria-hidden>
-                    {d.shared ? <Layers size={18} /> : desktopOS.test(d.os) ? <Laptop size={18} /> : <Smartphone size={18} />}
-                  </span>
-                  <div className="min-w-0">
-                    <div className="truncate text-sm font-semibold">{name}</div>
-                    <div className="text-xs break-words text-[var(--ink-500)]">
-                      {meta ? `${meta} · ` : ""}
-                      {ago(d.last_seen)}
-                    </div>
-                  </div>
-                  {confirm === d.id ? null : (
-                    <Button size="sm" disabled={busy || !!wait} onClick={() => setConfirm(d.id)} aria-label={t("sub.unbindLabel", { name })}>
-                      {t("sub.unbind")}
-                    </Button>
-                  )}
-                </div>
-                {confirm === d.id ? (
-                  <div className="mt-2 rounded-2xl bg-[var(--hover)] p-3" role="group" aria-label={t("sub.unbindLabel", { name })}>
-                    <p className="text-[13px] text-[var(--ink-700)]">{t("sub.unbindWarn")}</p>
-                    <div className="mt-2 flex justify-end gap-2">
-                      <Button variant="ghost" size="sm" disabled={busy} onClick={() => setConfirm(null)}>
-                        {t("common.cancel")}
-                      </Button>
-                      <Button variant="danger-solid" size="sm" loading={busy} onClick={() => void unbind(d.id)}>
-                        {t("sub.unbindYes")}
-                      </Button>
-                    </div>
-                  </div>
-                ) : null}
-              </li>
-            );
-          })}
-        </ul>
-      )}
-      {error ? (
-        <p className="mt-2 text-[13px] text-[var(--berry-600)]" role="alert">
-          {error}
-        </p>
-      ) : wait ? (
-        <p className="mt-2 text-xs text-[var(--ink-500)]">{t("sub.unbindAfter", { date: dateShort(wait), time: time(wait) })}</p>
-      ) : null}
-      <p className="mt-2 text-xs text-[var(--ink-500)]">{t("sub.devicesNote")}</p>
-    </section>
-  );
-}
-
 function Shell({ brand, children }: { brand?: string; children: React.ReactNode }) {
   return (
-    <main className="mx-auto flex max-w-[440px] flex-col gap-3 px-4 pt-6 pb-10">
+    <main className="calm-glass mx-auto flex max-w-[440px] flex-col gap-3 px-4 pt-[calc(24px+env(safe-area-inset-top))] pb-[calc(40px+env(safe-area-inset-bottom))]">
       <div className="flex items-center gap-2 px-1 pb-1">
         <span className="font-display grid h-7 w-7 place-items-center rounded-[9px] bg-[var(--ink-900)] text-[13px] font-semibold text-white">{(brand ?? "V")[0]}</span>
         <span className="font-display text-[15px] font-semibold tracking-tight">{brand ?? ""}</span>
@@ -541,14 +466,16 @@ function Shell({ brand, children }: { brand?: string; children: React.ReactNode 
   );
 }
 
-function Root() {
-  const locale = useLocale();
-  return <SubPage key={locale} />;
-}
-
-createRoot(document.getElementById("root")!).render(
-  <StrictMode>
-    <Atmosphere />
-    <Root />
-  </StrictMode>,
-);
+// Dictionaries load before the first render: t() stays synchronous everywhere.
+void initI18n(subDicts).then(() => {
+  // The tab's title until the subscription says its brand (sub.html's own is Russian).
+  document.title = t("sub.pageTitle");
+  createRoot(document.getElementById("root")!).render(
+    <StrictMode>
+      <ErrorBoundary>
+        <Atmosphere calm />
+        <SubPage />
+      </ErrorBoundary>
+    </StrictMode>,
+  );
+});

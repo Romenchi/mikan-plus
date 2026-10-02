@@ -21,6 +21,7 @@ type fakeNodes struct {
 	targets  map[string]nodeapi.TargetResult // by dest; any other dest works
 	found    []nodeapi.TargetResult
 	checks   int
+	onScan   func() // runs while a scan is under way: the admin edits meanwhile
 }
 
 func (f *fakeNodes) Activity(_ context.Context, id int64) (nodeapi.Activity, error) {
@@ -40,6 +41,9 @@ func (f *fakeNodes) CheckTarget(_ context.Context, _ int64, req nodeapi.TargetCh
 }
 
 func (f *fakeNodes) ScanTargets(context.Context, int64, nodeapi.TargetScanRequest) (nodeapi.TargetScan, error) {
+	if f.onScan != nil {
+		f.onScan()
+	}
 	return nodeapi.TargetScan{Scanned: 253, Results: f.found}, nil
 }
 
@@ -399,5 +403,54 @@ func TestBoundDevices(t *testing.T) {
 	e.tn.Step(e.ctx)
 	if s, _ := e.tn.Status(x.ID); !s.CutOff || s.Blocked != 1 {
 		t.Fatalf("the bound device must count, and what it reached must survive a restart: %+v", s)
+	}
+}
+
+// Behind a TCP proxy the port is what the proxy forwards to: a blocked inbound there
+// never moves, even with its switch left on. Its REALITY target is the admin's call.
+func TestNeverMovesAPortBehindAProxy(t *testing.T) {
+	e := setup(t)
+	x := e.inbound(t, "vless-xhttp")
+	if err := e.st.Q.SetInboundListen(e.ctx, db.SetInboundListenParams{Listen: "127.0.0.1", ID: x.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.Q.SetInboundAuto(e.ctx, db.SetInboundAutoParams{AutoPort: 1, AutoSni: 0, ID: x.ID}); err != nil {
+		t.Fatal(err)
+	}
+	hold := DefaultOptions().Hold
+	e.worked(t)
+	for _, d := range []time.Duration{0, hold, hold} {
+		e.reaches("hysteria2", "tuic", "vless-vision")
+		e.step(t, d)
+	}
+	if s, _ := e.tn.Status(x.ID); !s.CutOff || s.Stuck != "off" || e.inbound(t, "vless-xhttp").Port != "443" || len(e.events(t)) != 0 {
+		t.Fatalf("moved behind a proxy: %+v, port %s", s, e.inbound(t, "vless-xhttp").Port)
+	}
+
+	if err := e.st.Q.SetInboundAuto(e.ctx, db.SetInboundAutoParams{AutoPort: 1, AutoSni: 1, ID: x.ID}); err != nil {
+		t.Fatal(err)
+	}
+	e.nodes.found = []nodeapi.TargetResult{good("203.0.113.44:443", "shop.example.org")}
+	e.reaches("hysteria2", "tuic", "vless-vision")
+	e.step(t, time.Minute)
+	if got := e.inbound(t, "vless-xhttp"); got.Port != "443" || sniOf(t, got) != "shop.example.org" {
+		t.Fatalf("port kept, target replaced: port %s sni %s", got.Port, sniOf(t, got))
+	}
+}
+
+// The subscription port is the panel's: a blocked inbound skips it on the way out.
+func TestMoveSkipsTheSubscriptionPort(t *testing.T) {
+	e := setup(t)
+	if err := settings.Set(e.ctx, settings.New(e.st.Q), settings.KeySubPort, 2053); err != nil {
+		t.Fatal(err)
+	}
+	hold := DefaultOptions().Hold
+	e.worked(t)
+	for _, d := range []time.Duration{0, hold} {
+		e.reaches("hysteria2", "tuic", "vless-vision")
+		e.step(t, d)
+	}
+	if got := e.inbound(t, "vless-xhttp").Port; got != "2083" {
+		t.Fatalf("moved to %s, want the next pool port after the subscription port", got)
 	}
 }

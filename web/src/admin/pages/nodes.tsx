@@ -1,13 +1,18 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowRightLeft, Cloud, Copy, KeyRound, Pencil, Plus, Trash2 } from "lucide-react";
+import { ArrowRightLeft, Cloud, Copy, KeyRound, Pencil, Plus, ShieldCheck, Trash2, Waypoints } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { api, ApiError, errorText, unwrap, type Schemas } from "../../api/client";
 import { qk, useNodes } from "../../api/hooks";
+import { CertDrawer, certUntil } from "../../components/cert-drawer";
 import { Confirm, Drawer } from "../../components/overlay";
+import { QueryBoundary } from "../../components/query";
 import { useToast } from "../../components/toast";
-import { Bar, Button, EmptyState, ErrorState, Field, PageHeader, Pill, Skeleton, Switch } from "../../components/ui";
-import { t } from "../../i18n";
+import { Bar, Button, EmptyState, Field, PageHeader, Pill, Skeleton } from "../../components/ui";
+import { Switch } from "../../components/switch";
+import { t, tMaybe } from "../../i18n";
+import { useCopy } from "../../lib/copy";
 import { bytes, num } from "../../lib/format";
+import { CascadeDrawer } from "./node-cascade";
 import { RelayDrawer } from "./node-relay";
 import { WarpDrawer } from "./node-warp";
 
@@ -28,7 +33,9 @@ export function NodesPage() {
   const [removing, setRemoving] = useState<Node | null>(null);
   const [joined, setJoined] = useState<Joined | null>(null);
   const [warpOf, setWarpOf] = useState<Node | null>(null);
+  const [cascadeOf, setCascadeOf] = useState<Node | null>(null);
   const [relayOf, setRelayOf] = useState<Node | null>(null);
+  const [certOf, setCertOf] = useState<Node | null>(null);
   const refresh = () => {
     void qc.invalidateQueries({ queryKey: qk.nodes });
     void qc.invalidateQueries({ queryKey: qk.inbounds });
@@ -49,7 +56,9 @@ export function NodesPage() {
       setRemoving(null);
     },
     onSettled: refresh,
-    onError: (e) => toast.error(errorText(e)),
+    // A node still in use names what goes through it: all of it, not just the first.
+    onError: (e) =>
+      toast.error(e instanceof ApiError && e.status === 409 && e.detail === "node_in_use" ? `${t("errors.api.node_in_use")} ${e.messages.join("; ")}` : errorText(e)),
   });
 
   return (
@@ -64,33 +73,48 @@ export function NodesPage() {
           </Button>
         }
       />
-      {nodes.isPending ? (
-        <div className="grid gap-4 lg:grid-cols-2">
-          {[0, 1].map((i) => (
-            <Skeleton key={i} style={{ height: 220, borderRadius: 20 }} />
-          ))}
-        </div>
-      ) : nodes.isError ? (
-        <section className="card glass">
-          <ErrorState text={errorText(nodes.error)} onRetry={() => void nodes.refetch()} />
-        </section>
-      ) : nodes.data.length === 0 ? (
-        <section className="card glass">
-          <EmptyState title={t("nodes.emptyTitle")} text={t("nodes.emptyText")} />
-        </section>
-      ) : (
-        <div className="grid gap-4 lg:grid-cols-2">
-          {nodes.data.length > 1 && nodes.data.some((n) => n.local && !n.name) ? (
-            <div className="banner warn lg:col-span-2" role="status">
-              <Pencil size={18} className="shrink-0" aria-hidden />
-              <span>{t("nodes.nameLocalHint")}</span>
+      <QueryBoundary
+        query={nodes}
+        pending={
+          <div className="grid gap-4 lg:grid-cols-2">
+            {[0, 1].map((i) => (
+              <Skeleton key={i} style={{ height: 220, borderRadius: 20 }} />
+            ))}
+          </div>
+        }
+        wrap={(state) => <section className="card glass">{state}</section>}
+      >
+        {(list) =>
+          list.length === 0 ? (
+            <section className="card glass">
+              <EmptyState title={t("nodes.emptyTitle")} text={t("nodes.emptyText")} />
+            </section>
+          ) : (
+            <div className="grid gap-4 lg:grid-cols-2">
+              {list.length > 1 && list.some((n) => n.local && !n.name) ? (
+                <div className="banner warn lg:col-span-2" role="status">
+                  <Pencil size={18} className="shrink-0" aria-hidden />
+                  <span>{t("nodes.nameLocalHint")}</span>
+                </div>
+              ) : null}
+              {list.map((n, idx) => (
+                <NodeCard
+                  key={n.id}
+                  n={n}
+                  idx={idx}
+                  onEdit={() => setEditing(n)}
+                  onWarp={() => setWarpOf(n)}
+                  onCascade={() => setCascadeOf(n)}
+                  onRelay={() => setRelayOf(n)}
+                  onCert={() => setCertOf(n)}
+                  onRekey={() => setRekeying(n)}
+                  onRemove={() => setRemoving(n)}
+                />
+              ))}
             </div>
-          ) : null}
-          {nodes.data.map((n, idx) => (
-            <NodeCard key={n.id} n={n} idx={idx} onEdit={() => setEditing(n)} onWarp={() => setWarpOf(n)} onRelay={() => setRelayOf(n)} onRekey={() => setRekeying(n)} onRemove={() => setRemoving(n)} />
-          ))}
-        </div>
-      )}
+          )
+        }
+      </QueryBoundary>
       <AddNodeDrawer
         open={adding}
         onOpenChange={setAdding}
@@ -103,6 +127,19 @@ export function NodesPage() {
       <KeyDrawer joined={joined} onClose={() => setJoined(null)} />
       <WarpDrawer node={warpOf ? { id: warpOf.id, name: nodeLabel(warpOf) } : null} onClose={() => setWarpOf(null)} />
       <RelayDrawer node={relayOf ? { id: relayOf.id, name: nodeLabel(relayOf) } : null} onClose={() => setRelayOf(null)} />
+      <CascadeDrawer node={cascadeOf ? { id: cascadeOf.id, name: nodeLabel(cascadeOf) } : null} onClose={() => setCascadeOf(null)} />
+      <CertDrawer
+        open={!!certOf}
+        onClose={() => setCertOf(null)}
+        title={t("cert.nodeTitle")}
+        meta={certOf ? nodeLabel(certOf) : undefined}
+        lead={t("cert.nodeLead")}
+        current={certOf?.certificate ?? null}
+        save={(cert, key) => unwrap(api.PUT("/api/v1/nodes/{id}/certificate", { params: { path: { id: certOf!.id } }, body: { cert, key } })).then(() => qc.invalidateQueries({ queryKey: qk.nodes }))}
+        clear={() => unwrap(api.DELETE("/api/v1/nodes/{id}/certificate", { params: { path: { id: certOf!.id } } })).then(() => qc.invalidateQueries({ queryKey: qk.nodes }))}
+        clearLabel={t("cert.nodeClear")}
+        clearText={t("cert.nodeClearText")}
+      />
       <Confirm
         open={!!rekeying}
         onOpenChange={(v) => !v && setRekeying(null)}
@@ -126,7 +163,27 @@ export function NodesPage() {
   );
 }
 
-function NodeCard({ n, idx, onEdit, onWarp, onRelay, onRekey, onRemove }: { n: Node; idx: number; onEdit: () => void; onWarp: () => void; onRelay: () => void; onRekey: () => void; onRemove: () => void }) {
+function NodeCard({
+  n,
+  idx,
+  onEdit,
+  onWarp,
+  onCascade,
+  onRelay,
+  onCert,
+  onRekey,
+  onRemove,
+}: {
+  n: Node;
+  idx: number;
+  onEdit: () => void;
+  onWarp: () => void;
+  onCascade: () => void;
+  onRelay: () => void;
+  onCert: () => void;
+  onRekey: () => void;
+  onRemove: () => void;
+}) {
   const mem = n.mem_total ? Math.round((n.mem_used / n.mem_total) * 100) : 0;
   return (
     <section className="card glass reveal" style={{ "--i": idx } as React.CSSProperties}>
@@ -160,7 +217,7 @@ function NodeCard({ n, idx, onEdit, onWarp, onRelay, onRekey, onRemove }: { n: N
           <dd>
             {n.status === "ok" ? (
               <div className="flex items-center gap-2">
-                <Bar pct={n.cpu_percent} className="flex-1" />
+                <Bar pct={n.cpu_percent} className="flex-1" label={t("nodes.cpu")} />
                 <span className="num w-10 text-right">{Math.round(n.cpu_percent)}%</span>
               </div>
             ) : (
@@ -173,7 +230,7 @@ function NodeCard({ n, idx, onEdit, onWarp, onRelay, onRekey, onRemove }: { n: N
           <dd>
             {n.status === "ok" && n.mem_total ? (
               <div className="flex items-center gap-2" title={`${bytes(n.mem_used)} / ${bytes(n.mem_total)}`}>
-                <Bar pct={mem} className="flex-1" />
+                <Bar pct={mem} className="flex-1" label={t("nodes.memory")} />
                 <span className="num w-10 text-right">{mem}%</span>
               </div>
             ) : (
@@ -193,6 +250,14 @@ function NodeCard({ n, idx, onEdit, onWarp, onRelay, onRekey, onRemove }: { n: N
             <dd className="num">{n.version}</dd>
           </div>
         ) : null}
+        {n.certificate ? (
+          <div className="col-span-2">
+            <dt className="text-xs text-[var(--ink-500)]">{t("nodes.cert")}</dt>
+            <dd className={n.certificate.error ? "text-[var(--berry-600)]" : undefined}>
+              {n.certificate.error ? (tMaybe(`errors.acme.${n.certificate.error}`) ?? n.certificate.error) : t("nodes.certOwn", { until: certUntil(n.certificate.not_after) })}
+            </dd>
+          </div>
+        ) : null}
       </dl>
       <div className="mt-4 flex flex-wrap gap-2 border-t border-[var(--hairline)] pt-4">
         <Button size="sm" onClick={onEdit}>
@@ -203,6 +268,12 @@ function NodeCard({ n, idx, onEdit, onWarp, onRelay, onRekey, onRemove }: { n: N
         </Button>
         <Button size="sm" onClick={onWarp}>
           <Cloud size={16} aria-hidden /> WARP
+        </Button>
+        <Button size="sm" onClick={onCascade}>
+          <Waypoints size={16} aria-hidden /> {t("cascade.title")}
+        </Button>
+        <Button size="sm" onClick={onCert}>
+          <ShieldCheck size={16} aria-hidden /> {t("nodes.certButton")}
         </Button>
         {!n.local ? (
           <>
@@ -283,7 +354,7 @@ function AddNodeDrawer({ open, onOpenChange, onJoined }: { open: boolean; onOpen
     >
       <form id="add-node" onSubmit={submit} className="pt-5" noValidate>
         <Field label={t("nodes.name")} htmlFor="n-name" hint={t("nodes.nameHint")} error={errors.name}>
-          <input id="n-name" className="input" value={form.name} onChange={set("name")} placeholder="🇺🇸 США" maxLength={48} autoComplete="off" aria-invalid={!!errors.name} />
+          <input id="n-name" className="input" value={form.name} onChange={set("name")} placeholder={t("nodes.namePlaceholderNew")} maxLength={48} autoComplete="off" aria-invalid={!!errors.name} />
         </Field>
         <Field label={t("nodes.host")} htmlFor="n-host" hint={t("nodes.hostHint")} error={errors.host}>
           <input id="n-host" className="input mono" value={form.host} onChange={set("host")} placeholder="203.0.113.10" autoComplete="off" aria-invalid={!!errors.host} />
@@ -301,16 +372,8 @@ function AddNodeDrawer({ open, onOpenChange, onJoined }: { open: boolean; onOpen
 
 /** The join key is shown once: the panel keeps only its fingerprint. */
 function KeyDrawer({ joined, onClose }: { joined: Joined | null; onClose: () => void }) {
-  const toast = useToast();
-  const copy = async () => {
-    if (!joined) return;
-    try {
-      await navigator.clipboard.writeText(joined.command);
-      toast.ok(t("nodes.commandCopied"));
-    } catch {
-      toast.error(t("common.copyFailed"));
-    }
-  };
+  const copyText = useCopy();
+  const copy = () => joined && copyText(joined.command, t("nodes.commandCopied"));
   return (
     <Drawer
       open={!!joined}
@@ -402,7 +465,7 @@ function EditNodeDrawer({ node, onClose }: { node: Node | null; onClose: () => v
     >
       <form id="edit-node" onSubmit={submit} className="pt-5" noValidate>
         <Field label={t("nodes.name")} htmlFor="e-name" hint={t("nodes.nameHint")} error={errors.name}>
-          <input id="e-name" className="input" value={form.name} onChange={set("name")} placeholder="🇳🇱 Нидерланды" maxLength={48} autoComplete="off" aria-invalid={!!errors.name} />
+          <input id="e-name" className="input" value={form.name} onChange={set("name")} placeholder={t("nodes.namePlaceholderEdit")} maxLength={48} autoComplete="off" aria-invalid={!!errors.name} />
         </Field>
         {node && !node.local ? (
           <>

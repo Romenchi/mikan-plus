@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"log/slog"
 	"time"
 
 	"mikan/internal/panel/secure"
@@ -23,10 +24,12 @@ var ErrNoSession = errors.New("no valid session")
 type Sessions struct {
 	q   *db.Queries
 	now func() time.Time
+	log *slog.Logger
 }
 
-func NewSessions(q *db.Queries, now func() time.Time) *Sessions {
-	return &Sessions{q: q, now: now}
+// NewSessions: log may be nil, it only hears of a last-seen time that could not be saved.
+func NewSessions(q *db.Queries, now func() time.Time, log *slog.Logger) *Sessions {
+	return &Sessions{q: q, now: now, log: log}
 }
 
 // Create returns the raw cookie token; only its SHA-256 is stored.
@@ -70,15 +73,13 @@ func (s *Sessions) Lookup(ctx context.Context, token string) (db.Session, error)
 	}
 	if now.Sub(time.Unix(sess.LastSeenAt, 0)) > touchEvery {
 		sess.LastSeenAt = now.Unix()
-		if err := s.q.TouchSession(ctx, db.TouchSessionParams{LastSeenAt: sess.LastSeenAt, IDHash: sess.IDHash}); err != nil {
-			return db.Session{}, err
+		// The session is valid; failing to note that it was seen (a busy database) must not
+		// fail the request. The next one notes it.
+		if err := s.q.TouchSession(ctx, db.TouchSessionParams{LastSeenAt: sess.LastSeenAt, IDHash: sess.IDHash}); err != nil && s.log != nil {
+			s.log.Warn("session last seen not saved", "err", err)
 		}
 	}
 	return sess, nil
-}
-
-func (s *Sessions) Revoke(ctx context.Context, token string) error {
-	return s.q.DeleteSession(ctx, secure.SHA256Hex(token))
 }
 
 func (s *Sessions) Cleanup(ctx context.Context) error {

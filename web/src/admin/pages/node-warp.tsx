@@ -3,13 +3,17 @@
 // domains and networks through it for every inbound of the node.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { RefreshCw, Trash2 } from "lucide-react";
-import { useEffect, useState } from "react";
-import { api, ApiError, errorText, unwrap, type Schemas } from "../../api/client";
+import { useState } from "react";
+import { api, errorText, unwrap, type Schemas } from "../../api/client";
 import { qk } from "../../api/hooks";
 import { Confirm, Drawer } from "../../components/overlay";
 import { useToast } from "../../components/toast";
-import { Button, ErrorState, Field, Pill, Segmented, Skeleton, Switch } from "../../components/ui";
+import { QueryBoundary } from "../../components/query";
+import { Button, Field, Pill, Segmented, Skeleton } from "../../components/ui";
+import { Switch } from "../../components/switch";
 import { t } from "../../i18n";
+import { useDraft } from "../../lib/draft";
+import { fieldErrors } from "../../lib/fields";
 import { ago } from "../../lib/format";
 
 type Warp = Schemas["WarpView"];
@@ -17,7 +21,7 @@ type Warp = Schemas["WarpView"];
 export function useWarp(nodeId: number | null, enabled = true) {
   return useQuery({
     queryKey: qk.warp(nodeId ?? 0),
-    queryFn: () => unwrap(api.GET("/api/v1/nodes/{id}/warp", { params: { path: { id: nodeId! } } })),
+    queryFn: ({ signal }) => unwrap(api.GET("/api/v1/nodes/{id}/warp", { params: { path: { id: nodeId! } }, signal })),
     enabled: enabled && nodeId != null,
   });
 }
@@ -27,15 +31,15 @@ export function WarpDrawer({ node, onClose }: { node: { id: number; name: string
   return (
     <Drawer open={!!node} onOpenChange={(v) => !v && onClose()} title={t("warp.title")} meta={node?.name}>
       <div className="pt-5">
-        {warp.isPending ? (
-          <Skeleton style={{ height: 240, borderRadius: 16 }} />
-        ) : warp.isError ? (
-          <ErrorState text={errorText(warp.error)} onRetry={() => void warp.refetch()} />
-        ) : warp.data.configured ? (
-          <Configured nodeId={node!.id} w={warp.data} refetch={() => void warp.refetch()} checking={warp.isFetching} onClose={onClose} />
-        ) : (
-          <Setup nodeId={node!.id} />
-        )}
+        <QueryBoundary query={warp} pending={<Skeleton style={{ height: 240, borderRadius: 16 }} />}>
+          {(w) =>
+            w.configured ? (
+              <Configured key={node!.id} nodeId={node!.id} w={w} refetch={() => void warp.refetch()} checking={warp.isFetching} onClose={onClose} />
+            ) : (
+              <Setup key={node!.id} nodeId={node!.id} />
+            )
+          }
+        </QueryBoundary>
       </div>
     </Drawer>
   );
@@ -60,7 +64,7 @@ function Setup({ nodeId }: { nodeId: number }) {
     onSuccess: done,
   });
   const err = (how === "register" ? register.error : load.error) as unknown;
-  const fields = err instanceof ApiError ? err.fields : {};
+  const fields = fieldErrors(err);
   return (
     <>
       <p className="mb-4 text-[13px] text-[var(--ink-600)]">{t("warp.intro")}</p>
@@ -111,14 +115,15 @@ function Setup({ nodeId }: { nodeId: number }) {
 function Configured({ nodeId, w, refetch, checking, onClose }: { nodeId: number; w: Warp; refetch: () => void; checking: boolean; onClose: () => void }) {
   const qc = useQueryClient();
   const toast = useToast();
-  const [enabled, setEnabled] = useState(w.enabled);
-  const [routes, setRoutes] = useState(w.routes.join("\n"));
+  // The status check refetches `w`: the typed routes survive it.
+  const {
+    draft: { enabled, routes },
+    setDraft,
+  } = useDraft({ enabled: w.enabled, routes: w.routes.join("\n") });
+  const setEnabled = (v: boolean) => setDraft((d) => ({ ...d, enabled: v }));
+  const setRoutes = (v: string) => setDraft((d) => ({ ...d, routes: v }));
   const [license, setLicense] = useState("");
   const [remove, setRemove] = useState(false);
-  useEffect(() => {
-    setEnabled(w.enabled);
-    setRoutes(w.routes.join("\n"));
-  }, [w]);
   const save = useMutation({
     mutationFn: () =>
       unwrap(
@@ -143,7 +148,7 @@ function Configured({ nodeId, w, refetch, checking, onClose }: { nodeId: number;
     },
     onError: (e) => toast.error(errorText(e)),
   });
-  const fields = save.error instanceof ApiError ? save.error.fields : {};
+  const fields = fieldErrors(save.error);
   const s = w.status;
   return (
     <>

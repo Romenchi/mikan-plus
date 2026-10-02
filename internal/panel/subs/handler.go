@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"path"
@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"mikan/internal/panel/billing"
@@ -32,6 +33,7 @@ type Config struct {
 	Direct     []string // the panel's and nodes' hosts: kept out of the tunnel
 	Groups     Groups
 	Routing    Routing
+	Rules      []string // the admin's own Clash rules, checked (ServedRules)
 	// Fingerprint is the default uTLS profile for inbounds that set none.
 	Fingerprint string
 	// Binding gives every device that sends its id keys of its own (domain.Devices);
@@ -59,6 +61,8 @@ type Handler struct {
 	trustProxy bool
 	tg         Telegram         // nil: no bot
 	shop       *billing.Service // nil: nothing on sale
+	log        *slog.Logger
+	logged     sync.Map // what has been logged lately → when, so a standing fault is one line an hour
 }
 
 // Telegram is the bot's part in subscriptions: the page's "Open in Telegram" link and the
@@ -71,35 +75,34 @@ type Telegram interface {
 // SetTelegram plugs in the bot.
 func (h *Handler) SetTelegram(tg Telegram) { h.tg = tg }
 
+// SetLogger sets where the handler says what it could not serve; without one it is silent.
+func (h *Handler) SetLogger(l *slog.Logger) {
+	if l != nil {
+		h.log = l
+	}
+}
+
+// warn logs a fault that repeats with every subscription fetch once an hour, not at each.
+func (h *Handler) warn(key, msg string, args ...any) {
+	now := h.now()
+	if at, ok := h.logged.Load(key); ok && now.Sub(at.(time.Time)) < time.Hour {
+		return
+	}
+	h.logged.Store(key, now)
+	h.log.Warn(msg, args...)
+}
+
 // SetShop takes payments: the providers' webhooks under /pay/ and the Mini App's shop.
 func (h *Handler) SetShop(s *billing.Service) { h.shop = s }
 
 func NewHandler(st *store.Store, cfg func(ctx context.Context) (Config, error), page http.Handler, now func() time.Time, devices Binder, trustProxy bool) *Handler {
-	return &Handler{st: st, cfg: cfg, page: page, now: now, devices: devices, trustProxy: trustProxy}
+	return &Handler{st: st, cfg: cfg, page: page, now: now, devices: devices, trustProxy: trustProxy, log: slog.New(slog.DiscardHandler)}
 }
 
 // clientIP is the device's address as the nodes see it too: clients reach the panel
 // directly (its host is a DIRECT rule in the profile).
 func (h *Handler) clientIP(r *http.Request) string {
-	if h.trustProxy {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			parts := strings.Split(xff, ",")
-			if ip := net.ParseIP(strings.TrimSpace(parts[len(parts)-1])); ip != nil {
-				return ip.String()
-			}
-		}
-	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		if v4 := ip.To4(); v4 != nil {
-			return v4.String()
-		}
-		return ip.String()
-	}
-	return host
+	return server.ClientIP(r.Header, r.RemoteAddr, h.trustProxy)
 }
 
 var unbindPath = regexp.MustCompile(`^devices/([0-9]{1,18})/unbind$`)
@@ -165,7 +168,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.page.ServeHTTP(w, r)
 		return
 	}
-	h.userInfoHeaders(w, u, cfg)
+	grants, err := domain.UserGrantsLeft(r.Context(), h.st.Q, u.ID, h.now())
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	h.userInfoHeaders(w, u, grants.Main(u.ID), cfg)
 	w.Header().Set("Cache-Control", "no-store")
 	if r.Method == http.MethodHead {
 		return // apps peek at the traffic headers; the keys go only with a real fetch
@@ -184,13 +192,22 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	prof.Inbounds = forApp(prof.Inbounds, DetectApp(r.Header.Get("User-Agent")), domain.State(u, h.now()))
+	prof.Skip = func(in db.Inbound, err error) {
+		h.warn("skip/"+strconv.FormatInt(in.ID, 10)+"/"+err.Error(), "subscription: an inbound is left out of the profiles", "inbound", in.Name, "err", err)
+	}
+	app := DetectApp(r.Header.Get("User-Agent"))
+	prof.Inbounds = forApp(prof.Inbounds, app, domain.State(u, grants.Main(u.ID), h.now()))
 	// The block detector trusts a device only once it took a profile with an inbound's
 	// current port and target (see autotune.Detect).
 	_ = h.st.Q.RecordSubFetch(r.Context(), db.RecordSubFetchParams{UserID: u.ID, Ip: h.clientIP(r), FetchedAt: h.now().Unix()})
 	switch format {
 	case "clash":
+		prof.Rules = RulesFor(cfg.Rules, app)
 		body, err := Mihomo(prof, cfg.Groups.WithDefaults(cfg.Lang), cfg.Routing)
+		if errors.Is(err, ErrNoProxies) {
+			h.stub(w, u, cfg, format, err)
+			return
+		}
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
@@ -200,6 +217,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(body)
 	default:
 		links, err := URIs(prof)
+		if errors.Is(err, ErrNoProxies) {
+			h.stub(w, u, cfg, format, err)
+			return
+		}
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
@@ -252,14 +273,16 @@ func (h *Handler) miniApp(w http.ResponseWriter, r *http.Request, rest string) {
 	}
 }
 
-// miniAppShop: "shop" lists what the Telegram account can buy, "pay" opens an invoice
-// for a new subscription (token "") or one of the account's own.
+// miniAppShop: "shop" lists what the Telegram account can buy (with token: the traffic
+// packages of that subscription too), "pay" opens an invoice for a new subscription
+// (token ""), one of the account's own, or a traffic package for it (package_id).
 func (h *Handler) miniAppShop(w http.ResponseWriter, r *http.Request, rest string) {
 	var in struct {
-		InitData string `json:"init_data"`
-		TariffID int64  `json:"tariff_id"`
-		Provider string `json:"provider"`
-		Token    string `json:"token"`
+		InitData  string `json:"init_data"`
+		TariffID  int64  `json:"tariff_id"`
+		PackageID int64  `json:"package_id"`
+		Provider  string `json:"provider"`
+		Token     string `json:"token"`
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
@@ -277,32 +300,6 @@ func (h *Handler) miniAppShop(w http.ResponseWriter, r *http.Request, rest strin
 		return
 	}
 	ctx := r.Context()
-	if rest == "shop" {
-		offers, av, err := h.shop.Offers(ctx)
-		if err != nil {
-			fail(http.StatusInternalServerError, "internal")
-			return
-		}
-		cfg, _ := h.cfg(ctx)
-		type offer struct {
-			ID          int64  `json:"id"`
-			Name        string `json:"name"`
-			Description string `json:"description"`
-			Stars       int64  `json:"stars,omitempty"`
-			Rub         int64  `json:"rub,omitempty"`
-		}
-		out := struct {
-			AllowNew  bool            `json:"allow_new"`
-			Providers map[string]bool `json:"providers"`
-			Offers    []offer         `json:"offers"`
-		}{AllowNew: h.shop.Config(ctx).AllowNew, Offers: []offer{},
-			Providers: map[string]bool{billing.Stars: av.Stars, billing.YooKassa: av.YooKassa, billing.CryptoBot: av.CryptoBot}}
-		for _, o := range offers {
-			out.Offers = append(out.Offers, offer{ID: o.Tariff.ID, Name: o.Tariff.Name, Description: billing.Describe(o.Tariff, cfg.Lang), Stars: o.Stars, Rub: o.Rub})
-		}
-		_ = json.NewEncoder(w).Encode(out)
-		return
-	}
 	var userID int64
 	if in.Token != "" {
 		for _, u := range users {
@@ -315,18 +312,82 @@ func (h *Handler) miniAppShop(w http.ResponseWriter, r *http.Request, rest strin
 			return
 		}
 	}
-	p, err := h.shop.Invoice(ctx, billing.InvoiceRequest{TgID: tgID, UserID: userID, TariffID: in.TariffID, Provider: in.Provider})
-	if err != nil {
-		code := billing.ErrProviderOff.Error()
-		for _, e := range []error{billing.ErrNotForSale, billing.ErrNewOff, billing.ErrTooManySubs, billing.ErrTooMany, billing.ErrNotYours} {
-			if errors.Is(err, e) {
-				code = e.Error()
-			}
+	if rest == "shop" {
+		offers, av, err := h.shop.Offers(ctx)
+		if err != nil {
+			fail(http.StatusInternalServerError, "internal")
+			return
 		}
-		fail(http.StatusConflict, code)
+		cfg, _ := h.cfg(ctx)
+		packages, err := h.shopPackages(ctx, userID, cfg.Lang)
+		if err != nil {
+			fail(http.StatusInternalServerError, "internal")
+			return
+		}
+		type offer struct {
+			ID          int64  `json:"id"`
+			Name        string `json:"name"`
+			Description string `json:"description"`
+			Stars       int64  `json:"stars,omitempty"`
+			Rub         int64  `json:"rub,omitempty"`
+		}
+		// Marketplace adapters take rubles; the buyer sees each by its own name.
+		type addon struct {
+			Provider string `json:"provider"`
+			Name     string `json:"name"`
+		}
+		out := struct {
+			AllowNew  bool            `json:"allow_new"`
+			Providers map[string]bool `json:"providers"`
+			Addons    []addon         `json:"addons"`
+			Offers    []offer         `json:"offers"`
+			Packages  []shopPackage   `json:"packages"`
+		}{AllowNew: h.shop.Config(ctx).AllowNew, Offers: []offer{}, Packages: packages, Addons: []addon{},
+			Providers: map[string]bool{billing.Stars: av.Stars}}
+		for _, id := range av.Addons {
+			out.Addons = append(out.Addons, addon{Provider: billing.AddonPrefix + id, Name: h.shop.AddonName(ctx, id, cfg.Lang)})
+		}
+		for _, o := range offers {
+			out.Offers = append(out.Offers, offer{ID: o.Tariff.ID, Name: o.Tariff.Name, Description: billing.Describe(o.Tariff, cfg.Lang), Stars: o.Stars, Rub: o.Rub})
+		}
+		_ = json.NewEncoder(w).Encode(out)
+		return
+	}
+	var p db.Payment
+	if in.PackageID != 0 {
+		p, err = h.shop.PackageInvoice(ctx, billing.PackageRequest{TgID: tgID, UserID: userID, PackageID: in.PackageID, Provider: billing.AdapterOf(in.Provider)})
+	} else {
+		p, err = h.shop.Invoice(ctx, billing.InvoiceRequest{TgID: tgID, UserID: userID, TariffID: in.TariffID, Provider: billing.AdapterOf(in.Provider)})
+	}
+	if err != nil {
+		status, code, unexplained := invoiceFailure(err)
+		if unexplained {
+			h.log.Warn("mini app: the invoice was not made", "provider", in.Provider, "err", err)
+		}
+		fail(status, code)
 		return
 	}
 	_ = json.NewEncoder(w).Encode(map[string]string{"url": p.PayUrl, "provider": p.Provider})
+}
+
+// invoiceFailure is what the Mini App answers when no invoice could be made. What the buyer
+// can act on is told as it is. A provider that is switched off is "provider_off". Anything
+// else, a provider that failed, a database that was busy, is the panel's trouble: the buyer
+// is told it did not work, not that payment is off, and unexplained says nobody has logged
+// the cause yet (billing logs a provider's failure itself).
+func invoiceFailure(err error) (status int, code string, unexplained bool) {
+	for _, e := range []error{billing.ErrNotForSale, billing.ErrNewOff, billing.ErrTooManySubs, billing.ErrTooMany, billing.ErrNotYours} {
+		if errors.Is(err, e) {
+			return http.StatusConflict, e.Error(), false
+		}
+	}
+	switch {
+	case err == billing.ErrProviderOff:
+		return http.StatusConflict, billing.ErrProviderOff.Error(), false
+	case errors.Is(err, billing.ErrProviderOff): // the provider failed
+		return http.StatusBadGateway, "invoice_failed", false
+	}
+	return http.StatusBadGateway, "invoice_failed", true
 }
 
 // forApp keeps the inbounds the app can use. Inbounds with one key for everyone go only
@@ -335,7 +396,7 @@ func forApp(ins []db.Inbound, app App, state string) []db.Inbound {
 	active := domain.CanConnect(state)
 	out := make([]db.Inbound, 0, len(ins))
 	for _, in := range ins {
-		t, err := proto.Parse(in.Config)
+		t, err := parseTemplate(in.Config)
 		if err != nil || !app.Supports(proto.NeedsOf(t)) || proto.Shared(t.Type()) && !active {
 			continue
 		}
@@ -367,12 +428,17 @@ func (h *Handler) profile(ctx context.Context, u db.User, cfg Config, slot db.Sl
 		return prof, err
 	}
 	allowed := domain.DecodeInbounds(u.Inbounds)
+	// A traffic pool that ran out leaves the subscription; the node already turns it away.
+	spent, err := domain.ExhaustedPools(ctx, h.st.Q, u.ID, h.now())
+	if err != nil {
+		return prof, err
+	}
 	nodes := map[int64]bool{}
 	for _, n := range cfg.Nodes {
 		nodes[n.ID] = true
 	}
 	for _, in := range all {
-		if in.Enabled == 0 || !nodes[in.NodeID] || (len(allowed) > 0 && !slices.Contains(allowed, in.ID)) {
+		if in.Enabled == 0 || !nodes[in.NodeID] || (len(allowed) > 0 && !slices.Contains(allowed, in.ID)) || in.PoolID.Valid && spent[in.PoolID.Int64] {
 			continue
 		}
 		prof.Inbounds = append(prof.Inbounds, in)
@@ -380,10 +446,15 @@ func (h *Handler) profile(ctx context.Context, u db.User, cfg Config, slot db.Sl
 	return prof, nil
 }
 
-func (h *Handler) userInfoHeaders(w http.ResponseWriter, u db.User, cfg Config) {
+// userInfoHeaders: the traffic and term apps show. With traffic packages left the total
+// is what the user can reach: what is used plus what is left.
+func (h *Handler) userInfoHeaders(w http.ResponseWriter, u db.User, grants int64, cfg Config) {
 	var total, expire int64
 	if u.TrafficLimit.Valid {
 		total = u.TrafficLimit.Int64
+		if grants > 0 {
+			total = max(total, u.UsedUp+u.UsedDown) + grants
+		}
 	}
 	if u.ExpiresAt.Valid {
 		expire = u.ExpiresAt.Int64
@@ -409,6 +480,7 @@ type Info struct {
 	UsedUp     int64      `json:"used_up"`
 	UsedDown   int64      `json:"used_down"`
 	Limit      *int64     `json:"limit,omitempty"`
+	Extra      int64      `json:"extra,omitempty"` // bytes left in traffic packages, spent after Limit
 	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
 	ResetsAt   *time.Time `json:"resets_at,omitempty"`
 	Devices    int        `json:"device_limit"`
@@ -420,6 +492,8 @@ type Info struct {
 	Binding     bool         `json:"binding"`
 	Bound       []DeviceItem `json:"devices"`
 	UnbindAfter *time.Time   `json:"unbind_after,omitempty" doc:"The subscriber may unbind again from then"`
+	// Pools: the user's traffic pools with a limit or with traffic used.
+	Pools []PoolInfo `json:"pools,omitempty"`
 }
 
 // DeviceItem is a bound device as the subscription page lists it.
@@ -436,8 +510,16 @@ type DeviceItem struct {
 
 func (h *Handler) info(ctx context.Context, w http.ResponseWriter, u db.User, prof Profile, cfg Config) {
 	now := h.now()
-	out := Info{Name: u.Name, Brand: cfg.Brand, SupportURL: cfg.SupportURL, State: domain.State(u, now), UsedUp: u.UsedUp, UsedDown: u.UsedDown,
+	grants, err := domain.UserGrantsLeft(ctx, h.st.Q, u.ID, now)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	out := Info{Name: u.Name, Brand: cfg.Brand, SupportURL: cfg.SupportURL, State: domain.State(u, grants.Main(u.ID), now), UsedUp: u.UsedUp, UsedDown: u.UsedDown,
 		Binding: cfg.Binding, Bound: []DeviceItem{}}
+	if u.TrafficLimit.Valid {
+		out.Extra = grants.Main(u.ID)
+	}
 	if h.tg != nil {
 		out.Telegram = h.tg.LinkURL(ctx, u.ID)
 	}
@@ -480,6 +562,12 @@ func (h *Handler) info(ctx context.Context, w http.ResponseWriter, u db.User, pr
 			out.Locations = append(out.Locations, n.Name)
 		}
 	}
+	pools, err := h.poolInfo(ctx, u.ID, grants)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	out.Pools = pools
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(out)
@@ -509,16 +597,7 @@ func (h *Handler) unbind(w http.ResponseWriter, r *http.Request, u db.User, id i
 }
 
 // sameOrigin: the browser says the request comes from this very site.
-func sameOrigin(r *http.Request) bool {
-	switch r.Header.Get("Sec-Fetch-Site") {
-	case "same-origin":
-		return true
-	case "":
-		o, err := url.Parse(r.Header.Get("Origin"))
-		return err == nil && o.Host != "" && o.Host == r.Host
-	}
-	return false
-}
+func sameOrigin(r *http.Request) bool { return server.FetchSite(r.Header, r.Host) == server.SiteSame }
 
 // stub answers a device that gets no keys: one placeholder server named after the reason,
 // so the app shows it where the servers would be, and the headers Happ-like apps read.
@@ -528,13 +607,21 @@ func (h *Handler) stub(w http.ResponseWriter, u db.User, cfg Config, format stri
 	if en {
 		name = "⛔ All device places are taken — open the subscription link in a browser"
 	}
-	if errors.Is(reason, domain.ErrNoHWID) {
+	switch {
+	case errors.Is(reason, ErrNoProxies):
+		// Nothing this app can use, or every server of the subscription is switched off: a
+		// profile with an empty group would be refused by the app as a whole.
+		name = "⛔ Для этого приложения нет подходящих серверов — откройте ссылку подписки в браузере"
+		if en {
+			name = "⛔ There are no servers this app can use — open the subscription link in a browser"
+		}
+	case errors.Is(reason, domain.ErrNoHWID):
 		name = "⛔ Приложение не сообщает ID устройства — поставьте Happ, Koala Clash или INCY"
 		if en {
 			name = "⛔ The app does not send a device ID — install Happ, Koala Clash or INCY"
 		}
 		w.Header().Set("X-Hwid-Not-Supported", "true")
-	} else {
+	default:
 		w.Header().Set("X-Hwid-Max-Devices-Reached", "true")
 	}
 	if format == "clash" {
@@ -554,12 +641,12 @@ func (h *Handler) stub(w http.ResponseWriter, u db.User, cfg Config, format stri
 	_, _ = w.Write([]byte(base64.StdEncoding.EncodeToString([]byte(link))))
 }
 
-var (
-	clashAgents = []string{"clash", "mihomo", "flclash", "stash", "verge", "koala"}
-	uriAgents   = []string{"happ", "v2raytun", "v2rayng", "v2rayn", "streisand", "hiddify", "nekobox", "nekoray", "karing", "shadowrocket", "foxray", "v2box", "sing-box"}
-)
+// Apps that take share links and that DetectApp does not tell apart (it is about what
+// the app's core can run, not about the format).
+var linkApps = []string{"streisand", "shadowrocket", "foxray"}
 
-// Format picks the response format: explicit ?format= wins, then the client's User-Agent.
+// Format picks the response format: explicit ?format= wins, then the client's User-Agent,
+// by the family DetectApp makes of it, so the two never disagree about an app.
 func Format(userAgent, accept, query string) string {
 	switch strings.ToLower(query) {
 	case "clash", "mihomo", "yaml":
@@ -569,13 +656,14 @@ func Format(userAgent, accept, query string) string {
 	case "html":
 		return "html"
 	}
-	ua := strings.ToLower(userAgent)
-	for _, a := range clashAgents {
-		if strings.Contains(ua, a) {
-			return "clash"
-		}
+	switch DetectApp(userAgent).Family {
+	case FamilyMihomo, FamilyStash:
+		return "clash"
+	case FamilyXray, FamilySingBox:
+		return "uri"
 	}
-	for _, a := range uriAgents {
+	ua := strings.ToLower(userAgent)
+	for _, a := range linkApps {
 		if strings.Contains(ua, a) {
 			return "uri"
 		}
@@ -584,4 +672,43 @@ func Format(userAgent, accept, query string) string {
 		return "html"
 	}
 	return "uri"
+}
+
+// PoolInfo is one traffic pool as the subscription page shows it.
+type PoolInfo struct {
+	Name  string `json:"name"`
+	Limit *int64 `json:"limit,omitempty"` // bytes; none: unlimited
+	Used  int64  `json:"used"`
+	Extra int64  `json:"extra,omitempty"` // bytes left in the pool's traffic packages
+}
+
+// poolInfo lists the user's pools worth showing: those with a limit or some traffic.
+func (h *Handler) poolInfo(ctx context.Context, userID int64, grants domain.GrantsLeft) ([]PoolInfo, error) {
+	rows, err := h.st.Q.ListUserPools(ctx, userID)
+	if err != nil || len(rows) == 0 {
+		return nil, err
+	}
+	pools, err := h.st.Q.ListTrafficPools(ctx)
+	if err != nil {
+		return nil, err
+	}
+	names := map[int64]string{}
+	for _, p := range pools {
+		names[p.ID] = p.Name
+	}
+	var out []PoolInfo
+	for _, r := range rows {
+		used := r.UsedUp + r.UsedDown
+		if !r.TrafficLimit.Valid && used == 0 {
+			continue
+		}
+		pi := PoolInfo{Name: names[r.PoolID], Used: used}
+		if r.TrafficLimit.Valid {
+			l := r.TrafficLimit.Int64
+			pi.Limit = &l
+			pi.Extra = grants.Pool(userID, r.PoolID)
+		}
+		out = append(out, pi)
+	}
+	return out, nil
 }

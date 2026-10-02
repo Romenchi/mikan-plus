@@ -72,7 +72,8 @@ func TestRegister(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("license: %v %v", ok, err)
 	}
-	if _, err := c.SetLicense(context.Background(), a.ID, "wrong", "aB3dE5fG-hI7jK9lM-nO1pQ3rS"); code(err) != "warp_refused_401" {
+	var refused *Error
+	if _, err := c.SetLicense(context.Background(), a.ID, "wrong", "aB3dE5fG-hI7jK9lM-nO1pQ3rS"); !errors.As(err, &refused) || refused.Code != "warp_refused" || refused.Status != 401 {
 		t.Fatalf("someone else's registration: %v", err)
 	}
 	if _, err := (Client{API: "http://127.0.0.1:1"}).Register(context.Background(), ""); code(err) != "warp_unreachable" {

@@ -11,7 +11,8 @@ import (
 	"path/filepath"
 
 	"github.com/pressly/goose/v3"
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 
 	"mikan/internal/panel/store/db"
 )
@@ -54,6 +55,16 @@ func Open(ctx context.Context, dataDir string) (*Store, error) {
 }
 
 func migrate(ctx context.Context, conn *sql.DB) error {
+	var hasNodeRelays int
+	_ = conn.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='node_relays'").Scan(&hasNodeRelays)
+	if hasNodeRelays == 0 {
+		var v13Applied int
+		_ = conn.QueryRowContext(ctx, "SELECT count(*) FROM goose_db_version WHERE version_id=13 AND is_applied=1").Scan(&v13Applied)
+		if v13Applied > 0 {
+			_, _ = conn.ExecContext(ctx, "DELETE FROM goose_db_version WHERE version_id=13")
+		}
+	}
+
 	fsys, err := fs.Sub(migrations, "migrations")
 	if err != nil {
 		return err
@@ -70,15 +81,33 @@ func migrate(ctx context.Context, conn *sql.DB) error {
 
 func (s *Store) Close() error { return s.DB.Close() }
 
-// Tx runs fn inside a transaction bound to a Queries instance.
+// Tx runs fn inside a transaction bound to a Queries instance. The transaction takes the
+// write lock when it begins, so a panic in fn must not leave it open: the panic goes on,
+// the transaction is rolled back first (a background context would never cancel it).
 func (s *Store) Tx(ctx context.Context, fn func(q *db.Queries) error) error {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if p := recover(); p != nil {
+			_ = tx.Rollback()
+			panic(p)
+		}
+	}()
 	if err := fn(s.Q.WithTx(tx)); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
 	return tx.Commit()
+}
+
+// IsUnique says whether err is a UNIQUE (or primary key) constraint violation, so that
+// callers need not match the text of the driver's message.
+func IsUnique(err error) bool {
+	var se *sqlite.Error
+	if !errors.As(err, &se) {
+		return false
+	}
+	return se.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE || se.Code() == sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY
 }

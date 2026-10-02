@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"mikan/internal/fsutil"
 	"mikan/internal/release"
 )
 
@@ -69,7 +70,7 @@ func fetch(url string, pub ed25519.PublicKey) Source {
 		}
 		return io.ReadAll(io.LimitReader(resp.Body, limit))
 	}
-	return func(ctx context.Context) (release.Manifest, error) {
+	once := func(ctx context.Context) (release.Manifest, error) {
 		data, err := get(ctx, url, 1<<20)
 		if err != nil {
 			return release.Manifest{}, err
@@ -79,6 +80,15 @@ func fetch(url string, pub ed25519.PublicKey) Source {
 			return release.Manifest{}, err
 		}
 		return release.Parse(data, string(sig), pub)
+	}
+	return func(ctx context.Context) (release.Manifest, error) {
+		m, err := once(ctx)
+		// The manifest and its signature are two requests: a release published between them
+		// leaves the new manifest with the old signature. Asking again gets a matching pair.
+		if errors.Is(err, release.ErrSignature) {
+			m, err = once(ctx)
+		}
+		return m, err
 	}
 }
 
@@ -104,28 +114,42 @@ func New(dataDir, version string, source Source, log *slog.Logger, now func() ti
 	return c
 }
 
+// How often the release is looked for, and how soon again after a check that failed: a
+// GitHub that was down at the moment must not leave "error" on the page for a day.
+var (
+	firstCheck = time.Minute
+	checkEvery = 24 * time.Hour
+	retryAfter = time.Hour
+)
+
 // Run checks a minute after the start, then once a day.
 func (c *Checker) Run(ctx context.Context) {
 	if c.source == nil {
 		return
 	}
-	t := time.NewTimer(time.Minute)
+	t := time.NewTimer(firstCheck)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			c.Check(ctx)
-			t.Reset(24 * time.Hour)
+			next := checkEvery
+			// No release yet is an answer, not a failure.
+			if err := c.check(ctx); err != nil && !errors.Is(err, ErrNoRelease) {
+				next = retryAfter
+			}
+			t.Reset(next)
 		}
 	}
 }
 
 // Check asks for the newest release now.
-func (c *Checker) Check(ctx context.Context) {
+func (c *Checker) Check(ctx context.Context) { _ = c.check(ctx) }
+
+func (c *Checker) check(ctx context.Context) error {
 	if c.source == nil {
-		return
+		return nil
 	}
 	m, err := c.source(ctx)
 	c.mu.Lock()
@@ -136,10 +160,11 @@ func (c *Checker) Check(ctx context.Context) {
 		if c.log != nil {
 			c.log.Warn("update check", "err", err)
 		}
-		return
+		return err
 	}
 	c.err = ""
 	c.latest = &m
+	return nil
 }
 
 type State struct {
@@ -213,9 +238,5 @@ func (c *Checker) write(name string, data []byte) error {
 	if err := os.MkdirAll(c.dir, 0o755); err != nil {
 		return err
 	}
-	tmp := filepath.Join(c.dir, "."+name+".tmp")
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, filepath.Join(c.dir, name))
+	return fsutil.WriteFileAtomic(filepath.Join(c.dir, name), data, 0o644)
 }

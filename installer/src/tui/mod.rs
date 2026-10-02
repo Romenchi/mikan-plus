@@ -9,7 +9,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use ratatui::crossterm::event::{self, Event, KeyEvent, KeyEventKind};
+use ratatui::crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEvent, KeyEventKind};
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::setup::Options;
@@ -26,6 +26,10 @@ pub fn start() -> Result<()> {
             bail!("the menu needs a terminal; the commands are in mikan --help");
         }
         bail!("the installer needs a terminal; for scripts: mikan install --yes (see mikan install --help)");
+    }
+    if crate::setup::unfinished_install() {
+        // The menu of a half-installed server has nothing to show: the install goes on.
+        return crate::setup::install(Options::default());
     }
     if installed { menu() } else { wizard(Options::default()) }
 }
@@ -55,11 +59,16 @@ pub trait Screen {
     fn key(&mut self, k: KeyEvent) -> bool;
     /// Picks up background work; runs before every frame.
     fn tick(&mut self);
+    /// Takes pasted text (a terminal in bracketed paste mode sends it whole, not as keys).
+    fn paste(&mut self, _text: &str) {}
 }
 
 fn run(s: &mut dyn Screen) -> Result<()> {
     let mut t = ratatui::init();
+    // Without it a pasted line break reads as Enter.
+    let _ = ratatui::crossterm::execute!(std::io::stdout(), EnableBracketedPaste);
     let r = drive(&mut t, s);
+    let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableBracketedPaste);
     ratatui::restore();
     r
 }
@@ -68,12 +77,12 @@ fn drive(t: &mut DefaultTerminal, s: &mut dyn Screen) -> Result<()> {
     loop {
         s.tick();
         t.draw(|f| s.draw(f))?;
-        if event::poll(Duration::from_millis(80))?
-            && let Event::Key(k) = event::read()?
-            && k.kind == KeyEventKind::Press
-            && s.key(k)
-        {
-            return Ok(());
+        if event::poll(Duration::from_millis(80))? {
+            match event::read()? {
+                Event::Key(k) if k.kind == KeyEventKind::Press && s.key(k) => return Ok(()),
+                Event::Paste(text) => s.paste(&text),
+                _ => {}
+            }
         }
     }
 }

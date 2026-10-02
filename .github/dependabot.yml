@@ -1,0 +1,18 @@
+# The workflows pin every action to a commit; a pin does not move on its own, so
+# dependabot proposes the new commit (and the version comment beside it) weekly. The
+# installer's crates are the other dependency a security fix reaches only by a release.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: cargo
+    directory: /installer
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

@@ -1,13 +1,16 @@
 import "../styles/app.css";
+import "../styles/fonts-mono.css";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider } from "@tanstack/react-router";
-import * as Tooltip from "@radix-ui/react-tooltip";
+import { MotionConfig } from "motion/react";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { ApiError } from "../api/client";
 import { Atmosphere } from "../components/atmosphere";
+import { ErrorBoundary } from "../components/error-boundary";
 import { ToastProvider } from "../components/toast";
-import { useLocale } from "../i18n";
+import { initI18n } from "../i18n";
+import { adminDicts } from "../i18n/admin";
 import { initTheme } from "../lib/theme";
 import { createAppRouter } from "./router";
 
@@ -31,24 +34,23 @@ window.addEventListener("mikan:unauthorized", () => {
   void router.navigate({ to: "/login", search: { next: router.state.location.href } });
 });
 
-// Texts are read at render time; a language switch remounts the tree (the query cache and
-// the router state survive, they live outside it).
-function Root() {
-  const locale = useLocale();
-  return (
-    <ToastProvider key={locale}>
-      <Atmosphere />
-      <RouterProvider router={router} />
-    </ToastProvider>
-  );
-}
-
-createRoot(document.getElementById("root")!).render(
-  <StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <Tooltip.Provider delayDuration={300}>
-        <Root />
-      </Tooltip.Provider>
-    </QueryClientProvider>
-  </StrictMode>,
+// Dictionaries load before the first render: t() stays synchronous everywhere. Pages read
+// their texts at render time and subscribe to the language themselves (see page() in
+// router.tsx), so a switch redraws them without remounting anything.
+void initI18n(adminDicts).then(() =>
+  createRoot(document.getElementById("root")!).render(
+    <StrictMode>
+      <ErrorBoundary>
+        <QueryClientProvider client={queryClient}>
+          {/* Motion follows the system's "reduce motion" like the CSS animations do. */}
+          <MotionConfig reducedMotion="user">
+            <ToastProvider>
+              <Atmosphere />
+              <RouterProvider router={router} />
+            </ToastProvider>
+          </MotionConfig>
+        </QueryClientProvider>
+      </ErrorBoundary>
+    </StrictMode>,
+  ),
 );

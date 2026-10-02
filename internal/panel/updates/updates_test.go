@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -100,5 +101,68 @@ func TestHostFiles(t *testing.T) {
 	off := New("", "0.3.9", nil, nil, time.Now)
 	if err := off.Request(); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("no data dir: %v", err)
+	}
+}
+
+// A release published between the two requests (manifest, then signature) leaves a new
+// manifest with the old signature: the check asks again instead of failing for a day.
+func TestFetchAsksAgainOnAMismatchedPair(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	oldData, newData := manifest("0.3.9"), manifest("0.3.10")
+	var manifestGets int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/manifest.json":
+			manifestGets++
+			_, _ = w.Write(newData)
+		case "/manifest.json.sig":
+			// The first signature fetched is still the old release's.
+			if manifestGets == 1 {
+				_, _ = w.Write([]byte(release.Sign(oldData, priv)))
+				return
+			}
+			_, _ = w.Write([]byte(release.Sign(newData, priv)))
+		}
+	}))
+	defer srv.Close()
+	m, err := fetch(srv.URL+"/manifest.json", pub)(context.Background())
+	if err != nil || m.Version != "0.3.10" || manifestGets != 2 {
+		t.Fatalf("%+v %v after %d manifest requests", m, err, manifestGets)
+	}
+}
+
+// A check that failed is tried again within the hour, not at the next daily one; a
+// repository without a release is not a failure to hurry about.
+func TestRunRetriesAFailedCheck(t *testing.T) {
+	oldCheck, oldRetry, oldFirst := checkEvery, retryAfter, firstCheck
+	checkEvery, retryAfter, firstCheck = time.Hour, 30*time.Millisecond, time.Millisecond
+	t.Cleanup(func() { checkEvery, retryAfter, firstCheck = oldCheck, oldRetry, oldFirst })
+	if oldRetry > 2*time.Hour {
+		t.Fatalf("production retry %s", oldRetry)
+	}
+	var calls int
+	var mu sync.Mutex
+	c := New("", "0.3.9", func(context.Context) (release.Manifest, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		if calls < 3 {
+			return release.Manifest{}, errors.New("github is down")
+		}
+		var m release.Manifest
+		return m, json.Unmarshal(manifest("0.3.10"), &m)
+	}, nil, time.Now)
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
+	go func() { c.Run(ctx); close(stopped) }()
+	defer func() { cancel(); <-stopped }()
+	deadline := time.Now().Add(5 * time.Second)
+	for !c.State().Available() {
+		if time.Now().After(deadline) {
+			mu.Lock()
+			defer mu.Unlock()
+			t.Fatalf("after %d checks: %+v", calls, c.State())
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

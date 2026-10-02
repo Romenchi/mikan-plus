@@ -35,3 +35,7 @@ SELECT * FROM inbound_reach WHERE at >= ?;
 
 -- name: PruneInboundReach :exec
 DELETE FROM inbound_reach WHERE at < ?;
+
+-- name: SetInboundListen :exec
+-- The listen address is the node's business, clients get nothing new: updated_at stays.
+UPDATE inbounds SET listen = ? WHERE id = ?;
