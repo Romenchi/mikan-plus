@@ -22,7 +22,7 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/mikan-plus
+          images: ghcr.io/romenchi/mikan-plus
           tags: |
             type=raw,value=latest
       - uses: docker/build-push-action@v6
