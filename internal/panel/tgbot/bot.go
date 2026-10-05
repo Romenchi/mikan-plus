@@ -440,6 +440,9 @@ func (b *Bot) onMessage(ctx context.Context, out *Outbox, m *Message) {
 	case subLink.MatchString(text):
 		notice = b.linkByToken(ctx, out, w, chat, who(m.From), subLink.FindStringSubmatch(text)[1])
 	}
+	if trialNotice, ok := b.checkAndGiveTrial(ctx, out, w, chat, m.From); ok {
+		notice = trialNotice
+	}
 	b.freshMenu(out, chat, notice)
 }
 
@@ -530,6 +533,94 @@ func (b *Bot) applyRefereeReward(ctx context.Context, out *Outbox, refereeID int
 		_, err := c.Send(ctx, refereeID, msg, nil, false)
 		return err
 	}, nil)
+}
+
+func (b *Bot) checkAndGiveTrial(ctx context.Context, out *Outbox, w *words, chat int64, from *User) (string, bool) {
+	if b.d.Users == nil {
+		return "", false
+	}
+	cfg := b.Config(ctx)
+	if !cfg.Trial.Enabled {
+		return "", false
+	}
+	if claimed, err := b.d.Store.Q.HasTgTrial(ctx, chat); err == nil && claimed > 0 {
+		return "", false
+	}
+	if count, err := b.d.Store.Q.CountTgLinksOf(ctx, chat); err == nil && count > 0 {
+		return "", false
+	}
+
+	trialHours := cfg.Trial.Hours
+	if trialHours <= 0 {
+		trialHours = 24
+	}
+
+	dur := time.Duration(trialHours) * time.Hour
+
+	var refereeBonusDays int64
+	if ref, err := b.d.Store.Q.GetReferralByReferee(ctx, chat); err == nil && ref.RefereeBonusApplied == 0 {
+		if cfg.Referrals.Enabled && cfg.Referrals.Trigger == "on_start" && ref.RefereeRewardDays > 0 {
+			refereeBonusDays = ref.RefereeRewardDays
+			dur += time.Duration(refereeBonusDays) * 24 * time.Hour
+			_, _ = b.d.Store.Q.MarkRefereeBonusApplied(ctx, chat)
+		}
+	}
+
+	userName := who(from)
+	if userName == "" || userName == "?" {
+		userName = fmt.Sprintf("id%d", chat)
+	}
+	name := "Пробный: " + userName
+	if cfg.Lang == "en" {
+		name = "Trial: " + userName
+	}
+	contact := userName
+	if from != nil && from.Username != "" {
+		contact = "@" + from.Username
+	}
+
+	u, err := b.d.Users.CreateTrial(ctx, domain.CreateTrialInput{
+		Name:     name,
+		Contact:  contact,
+		TariffID: cfg.Trial.TariffID,
+		Duration: dur,
+	})
+	if err != nil {
+		b.d.Log.Error("telegram: trial create failed", "chat", chat, "err", err)
+		return "", false
+	}
+
+	now := b.d.Now().Unix()
+	_ = b.d.Store.Q.LinkTg(ctx, db.LinkTgParams{
+		UserID:    u.ID,
+		TgID:      chat,
+		CreatedAt: now,
+	})
+	_ = b.d.Store.Q.SetTgCurrent(ctx, db.SetTgCurrentParams{
+		Current: u.ID,
+		TgID:    chat,
+	})
+	_ = b.d.Store.Q.RecordTgTrial(ctx, db.RecordTgTrialParams{
+		TgID:      chat,
+		UserID:    u.ID,
+		CreatedAt: now,
+	})
+
+	var notice string
+	if cfg.Lang == "en" {
+		if refereeBonusDays > 0 {
+			notice = fmt.Sprintf("🎁 A free trial period has been activated for %d hours + %d days bonus via friend's invitation!\n\nTap “🔌 Connect a device” below to get started.", trialHours, refereeBonusDays)
+		} else {
+			notice = fmt.Sprintf("🎁 A free trial period for %d hours has been activated!\n\nTap “🔌 Connect a device” below to get started.", trialHours)
+		}
+	} else {
+		if refereeBonusDays > 0 {
+			notice = fmt.Sprintf("🎁 Вам активирован бесплатный пробный период на %d ч. + %d дн. бонуса по приглашению друга!\n\nНажмите «🔌 Подключить устройство» ниже, чтобы начать пользоваться.", trialHours, refereeBonusDays)
+		} else {
+			notice = fmt.Sprintf("🎁 Вам активирован бесплатный пробный период на %d часа!\n\nНажмите «🔌 Подключить устройство» ниже, чтобы начать пользоваться.", trialHours)
+		}
+	}
+	return notice, true
 }
 
 // freshMenu sends the main menu as a new message and removes the previous one, so the

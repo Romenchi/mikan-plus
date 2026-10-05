@@ -113,6 +113,106 @@ func (s *Users) create(ctx context.Context, in CreateInput) (db.User, error) {
 	return u, err
 }
 
+type CreateTrialInput struct {
+	Name     string
+	Contact  string
+	TariffID int64
+	Duration time.Duration
+}
+
+func (s *Users) CreateTrial(ctx context.Context, in CreateTrialInput) (db.User, error) {
+	u, err := s.createTrial(ctx, in)
+	if errors.Is(err, ErrNoSlots) {
+		if err := s.pool.Refill(ctx, RefillBatch); err != nil {
+			return db.User{}, err
+		}
+		s.changes.SlotsChanged()
+		u, err = s.createTrial(ctx, in)
+	}
+	if err != nil {
+		return db.User{}, err
+	}
+	s.changes.PoliciesChanged()
+	return u, nil
+}
+
+func (s *Users) createTrial(ctx context.Context, in CreateTrialInput) (db.User, error) {
+	var u db.User
+	err := s.st.Tx(ctx, func(q *db.Queries) error {
+		now := s.now().Unix()
+		var t db.Tariff
+		var err error
+		if in.TariffID > 0 {
+			t, err = q.GetTariff(ctx, in.TariffID)
+			if err != nil {
+				return err
+			}
+		} else {
+			tariffs, errList := q.ListTariffs(ctx)
+			if errList != nil {
+				return errList
+			}
+			for _, item := range tariffs {
+				lower := strings.ToLower(item.Name)
+				if strings.Contains(lower, "проб") || strings.Contains(lower, "trial") {
+					t = item
+					break
+				}
+			}
+			if t.ID == 0 && len(tariffs) > 0 {
+				t = tariffs[0]
+			}
+		}
+		if t.ID == 0 {
+			return fmt.Errorf("no tariff available for trial")
+		}
+
+		slot, err := q.TakeFreeSlot(ctx)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNoSlots
+		}
+		if err != nil {
+			return err
+		}
+
+		dur := in.Duration
+		if dur <= 0 {
+			dur = 24 * time.Hour
+		}
+		expiresAt := sql.NullInt64{Int64: now + int64(dur.Seconds()), Valid: true}
+		tags, _ := encodeTags([]string{"trial"})
+		name := strings.TrimSpace(in.Name)
+		if name == "" {
+			name = "Пробный доступ"
+		}
+
+		u, err = q.CreateUser(ctx, db.CreateUserParams{
+			Name:          name,
+			Contact:       strings.TrimSpace(in.Contact),
+			Note:          "Telegram Trial",
+			Tags:          tags,
+			TariffID:      sql.NullInt64{Int64: t.ID, Valid: true},
+			TrafficLimit:  t.TrafficLimit,
+			DeviceLimit:   t.DeviceLimit,
+			ResetStrategy: t.ResetStrategy,
+			PeriodDays:    30,
+			PeriodStart:   now,
+			ExpiresAt:     expiresAt,
+			BillingDay:    t.BillingDay,
+			SubToken:      secure.Token(24),
+			SlotID:        sql.NullInt64{Int64: slot.ID, Valid: true},
+			CreatedAt:     now,
+			UpdatedAt:     now,
+		})
+		if err != nil {
+			return err
+		}
+		return ApplyTariffPools(ctx, q, u.ID, t.ID)
+	})
+	return u, err
+}
+
+
 // createTx makes a user on q's transaction; anyTariff also takes an archived tariff (one
 // that was paid for before the admin archived it).
 func (s *Users) createTx(ctx context.Context, q *db.Queries, in CreateInput, anyTariff bool) (db.User, error) {

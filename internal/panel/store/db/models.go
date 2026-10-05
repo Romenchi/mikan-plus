@@ -374,3 +374,10 @@ type TgReferral struct {
 	CreatedAt           int64
 	AppliedAt           int64
 }
+
+type TgTrial struct {
+	TgID      int64
+	UserID    int64
+	CreatedAt int64
+}
+

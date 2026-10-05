@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Link, useBlocker, useNavigate, useSearch } from "@tanstack/react-router";
-import { ArrowDown, ArrowUp, Bell, Bot, Gift, Globe, LayoutList, Link2, Megaphone, Network, Plus, PlugZap, Send, Shield, Trash2, TriangleAlert } from "lucide-react";
+import { ArrowDown, ArrowUp, Bell, Bot, Gift, Globe, LayoutList, Link2, Megaphone, Network, Plus, PlugZap, Send, Shield, Sparkles, Trash2, TriangleAlert } from "lucide-react";
 import { useMemo, useState, type FormEvent } from "react";
 import { api, ApiError, errorText, unwrap, type Schemas } from "../../api/client";
 import { qk, useNodes, useSettings } from "../../api/hooks";
@@ -125,6 +125,7 @@ function TelegramBody({ v }: { v: View }) {
             left={
               <>
                 <OptionsCard draft={draft} setDraft={setDraft} v={v} />
+                <TrialCard draft={draft} setDraft={setDraft} />
                 <ReferralCard draft={draft} setDraft={setDraft} />
               </>
             }
@@ -591,6 +592,65 @@ function OptionsCard({ draft, setDraft, v }: { draft: Config; setDraft: (c: Conf
         {row(t("telegram.quietNight"), t("telegram.quietNightSub"), draft.quiet_night, (on) => setDraft({ ...draft, quiet_night: on }))}
         {NOTICES.map((k) => row(t(`telegram.notice.${k}`), t("telegram.noticeSub"), draft.notify[k], (on) => setDraft({ ...draft, notify: { ...draft.notify, [k]: on } })))}
       </ul>
+    </section>
+  );
+}
+
+function TrialCard({ draft, setDraft }: { draft: Config; setDraft: (c: Config) => void }) {
+  const trial = draft.trial ?? {
+    enabled: true,
+    hours: 24,
+  };
+
+  const updateTrial = (patch: Partial<typeof trial>) => {
+    setDraft({
+      ...draft,
+      trial: { ...trial, ...patch },
+    });
+  };
+
+  return (
+    <section {...rise(4)}>
+      <div className="card-head">
+        <div>
+          <h2 className="card-title">Бесплатный пробный период</h2>
+          <div className="card-sub">Автоматическая выдача подписки новым пользователям при запуске бота</div>
+        </div>
+        <Switch
+          checked={trial.enabled}
+          label="Выдавать пробный период"
+          onChange={(on) => updateTrial({ enabled: on })}
+        />
+      </div>
+
+      {trial.enabled ? (
+        <div className="mt-4 flex flex-col gap-4">
+          <Field
+            label="Длительность пробного периода (в часах)"
+            hint="По умолчанию 24 часа. Новый пользователь получит доступ сразу после команды /start или любого сообщения"
+          >
+            <input
+              type="number"
+              min={1}
+              max={720}
+              className="input"
+              value={trial.hours}
+              onChange={(e) => updateTrial({ hours: Math.max(1, parseInt(e.target.value) || 24) })}
+            />
+          </Field>
+
+          <div className="panel-soft p-3 text-xs text-[var(--ink-500)] flex items-start gap-2">
+            <Sparkles size={16} className="shrink-0 mt-0.5 text-[var(--accent)]" />
+            <div>
+              При входе в бот новый пользователь сразу получает активную подписку и кнопку <b>«Подключить устройство»</b>. Защита от повторной выдачи на один Telegram-аккаунт включена.
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="mt-2 text-xs text-[var(--ink-400)]">
+          Пробный период выключен. Новым пользователям показывается стандартное приветствие без выдачи подписки.
+        </div>
+      )}
     </section>
   );
 }

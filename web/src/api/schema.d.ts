@@ -1415,6 +1415,12 @@ export interface components {
                 referrer_days: number;
                 referee_days: number;
             };
+            /** @description Настройки пробного периода */
+            trial?: {
+                enabled: boolean;
+                hours: number;
+                tariff_id?: number;
+            };
             texts: components["schemas"]["Texts"];
         };
         CreateAPIKeyInputBody: {

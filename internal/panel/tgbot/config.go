@@ -19,6 +19,13 @@ type Config struct {
 	// QuietNight: the automatic notices from 22:00 to 9:00 Moscow time come without a sound.
 	QuietNight bool           `json:"quiet_night" doc:"Уведомления с 22:00 до 9:00 МСК приходят без звука"`
 	Referrals  ReferralConfig `json:"referrals" doc:"Настройки реферальной программы"`
+	Trial      TrialConfig    `json:"trial" doc:"Настройки пробного периода"`
+}
+
+type TrialConfig struct {
+	Enabled  bool  `json:"enabled" doc:"Выдавать пробный период при старте бота"`
+	Hours    int   `json:"hours" doc:"Длительность пробного периода в часах (по умолчанию 24)"`
+	TariffID int64 `json:"tariff_id,omitempty" doc:"ID тарифа для пробного периода (0 - подобрать автоматически)"`
 }
 
 type ReferralConfig struct {
@@ -94,6 +101,10 @@ func Default(lang string) Config {
 			Trigger:      "on_payment",
 			ReferrerDays: 3,
 			RefereeDays:  2,
+		},
+		Trial: TrialConfig{
+			Enabled: true,
+			Hours:   24,
 		},
 	}
 }
@@ -172,6 +183,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Referrals.Trigger == "" {
 		c.Referrals.Trigger = "on_payment"
+	}
+	if c.Trial.Hours <= 0 {
+		c.Trial.Hours = 24
 	}
 	return nil
 }
