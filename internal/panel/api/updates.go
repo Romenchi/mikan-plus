@@ -116,6 +116,7 @@ func (h *handlers) patchUpdates(ctx context.Context, in *patchUpdatesInput) (*up
 		if h.d.Updates != nil {
 			h.d.Updates.SetSource(updates.FetchFor(repo))
 			go h.d.Updates.Check(context.Background())
+		}
 		h.audit(ctx, sessionOf(ctx).AdminID, "updates.repo", "", "", map[string]any{"repo": repo})
 	}
 	if in.Body.Auto != nil {
