@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 
 	"mikan/internal/panel/settings"
 	"mikan/internal/panel/updates"
+	"mikan/internal/release"
 )
 
 type UpdatesView struct {
