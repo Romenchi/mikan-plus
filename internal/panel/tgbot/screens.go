@@ -121,6 +121,13 @@ func (b *Bot) screen(ctx context.Context, cfg Config, chat int64, data, notice s
 	return withNotice(render(pick(cfg.Texts.Main, w.main), vars)), b.menu(ctx, cfg, w, len(list))
 }
 
+func pickLang(isEn bool, en, ru string) string {
+	if isEn {
+		return en
+	}
+	return ru
+}
+
 func (b *Bot) welcome(ctx context.Context, cfg Config, w *words, notice string) (string, *Keyboard) {
 	brand := b.brand(ctx)
 	text := render(pick(cfg.Texts.Welcome, w.welcome), map[string]string{"brand": brand})
@@ -132,7 +139,7 @@ func (b *Bot) welcome(ctx context.Context, cfg Config, w *words, notice string) 
 		rows = append(rows, []Button{{Text: w.buy, CallbackData: "b"}})
 	}
 	if cfg.Referrals.Enabled {
-		rows = append(rows, []Button{{Text: labelOf(cfg, "ref", pick(cfg.Lang == "en", "🤝 Referrals", "🤝 Реферальная программа")), CallbackData: "ref"}})
+		rows = append(rows, []Button{{Text: labelOf(cfg, "ref", pickLang(cfg.Lang == "en", "🤝 Referrals", "🤝 Реферальная программа")), CallbackData: "ref"}})
 	}
 	if sup := b.supportURL(ctx); sup != "" {
 		rows = append(rows, []Button{{Text: labelOf(cfg, "support", w.support), URL: sup}})
@@ -433,9 +440,9 @@ func (b *Bot) referralScreen(ctx context.Context, cfg Config, w *words, chat int
 
 	var condition string
 	if cfg.Referrals.Trigger == "on_start" {
-		condition = pick(cfg.Lang == "en", "credited immediately upon joining", "начисляется сразу при переходе по ссылке")
+		condition = pickLang(cfg.Lang == "en", "credited immediately upon joining", "начисляется сразу при переходе по ссылке")
 	} else {
-		condition = pick(cfg.Lang == "en", "credited after friend's first payment", "начисляется после первой оплаты друга")
+		condition = pickLang(cfg.Lang == "en", "credited after friend's first payment", "начисляется после первой оплаты друга")
 	}
 
 	var sb strings.Builder
@@ -474,7 +481,7 @@ func (b *Bot) referralScreen(ctx context.Context, cfg Config, w *words, chat int
 
 	back := []Button{{Text: w.back, CallbackData: "m"}}
 	rows := [][]Button{
-		{{Text: "📤 " + pick(cfg.Lang == "en", "Share invite link", "Поделиться ссылкой"), URL: shareURL}},
+		{{Text: "📤 " + pickLang(cfg.Lang == "en", "Share invite link", "Поделиться ссылкой"), URL: shareURL}},
 		back,
 	}
 	return sb.String(), &Keyboard{rows}
