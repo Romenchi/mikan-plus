@@ -458,26 +458,35 @@ func (b *Bot) onReferralStart(ctx context.Context, out *Outbox, w *words, chat i
 		RefereeTgID:  chat,
 		CreatedAt:    now,
 	})
+	refDays := int64(cfg.Referrals.ReferrerDays)
+	if refDays <= 0 {
+		refDays = 3
+	}
+	refereeDays := int64(cfg.Referrals.RefereeDays)
+	if refereeDays <= 0 {
+		refereeDays = 2
+	}
 	if cfg.Referrals.Enabled && cfg.Referrals.Trigger == "on_start" {
-		days := int64(cfg.Referrals.ReferrerDays)
-		if days <= 0 {
-			days = 7
-		}
 		if affected, err := b.d.Store.Q.ApplyReferralReward(ctx, db.ApplyReferralRewardParams{
-			RewardDays:  days,
-			AppliedAt:   now,
-			RefereeTgID: chat,
+			RewardDays:        refDays,
+			RefereeRewardDays: refereeDays,
+			AppliedAt:         now,
+			RefereeTgID:       chat,
 		}); err == nil && affected > 0 {
-			b.applyReferrerReward(ctx, out, referrerID, days)
+			b.applyReferrerReward(ctx, out, referrerID, refDays)
+			b.applyRefereeReward(ctx, out, chat, refereeDays)
 		}
 	}
 	if cfg.Lang == "en" {
-		return "👋 Welcome! You joined via a friend's invitation."
+		return fmt.Sprintf("👋 Welcome! You joined via a friend's invitation (+%d bonus days to your subscription).", refereeDays)
 	}
-	return "👋 Добро пожаловать! Вы присоединились по приглашению друга."
+	return fmt.Sprintf("👋 Добро пожаловать! Вы присоединились по приглашению друга (бонус +%d дн. к вашей подписке).", refereeDays)
 }
 
 func (b *Bot) applyReferrerReward(ctx context.Context, out *Outbox, referrerID int64, days int64) {
+	if days <= 0 {
+		return
+	}
 	if b.d.Users != nil {
 		list, sub, ok := b.subs(ctx, referrerID)
 		if ok {
@@ -489,6 +498,36 @@ func (b *Bot) applyReferrerReward(ctx context.Context, out *Outbox, referrerID i
 	msg := fmt.Sprintf("🎉 <b>Реферальный бонус!</b>\n\nВаш друг присоединился по вашей ссылке! Вам начислено <b>+%d дн.</b> к подписке HeyCat.", days)
 	out.Notice(referrerID, func(ctx context.Context, c *Client) error {
 		_, err := c.Send(ctx, referrerID, msg, nil, false)
+		return err
+	}, nil)
+}
+
+func (b *Bot) applyRefereeReward(ctx context.Context, out *Outbox, refereeID int64, days int64) {
+	if days <= 0 {
+		return
+	}
+	applied := false
+	if b.d.Users != nil {
+		list, sub, ok := b.subs(ctx, refereeID)
+		if ok {
+			_, _ = b.d.Users.Extend(ctx, sub.ID, days)
+			applied = true
+		} else if len(list) > 0 {
+			_, _ = b.d.Users.Extend(ctx, list[0].ID, days)
+			applied = true
+		}
+	}
+	if applied {
+		_, _ = b.d.Store.Q.MarkRefereeBonusApplied(ctx, refereeID)
+	}
+	var msg string
+	if applied {
+		msg = fmt.Sprintf("🎁 <b>Реферальный бонус!</b>\n\nВы зарегистрировались по приглашению друга! Вам начислено <b>+%d дн.</b> к подписке HeyCat.", days)
+	} else {
+		msg = fmt.Sprintf("🎁 <b>Реферальный бонус!</b>\n\nВы зарегистрировались по приглашению друга! Бонус <b>+%d дн.</b> будет начислен сразу при подключении подписки.", days)
+	}
+	out.Notice(refereeID, func(ctx context.Context, c *Client) error {
+		_, err := c.Send(ctx, refereeID, msg, nil, false)
 		return err
 	}, nil)
 }
@@ -596,6 +635,20 @@ func (b *Bot) link(ctx context.Context, out *Outbox, w *words, chat int64, name 
 		return w.linkInvalid
 	}
 	_ = b.d.Store.Q.SetTgCurrent(ctx, db.SetTgCurrentParams{Current: userID, TgID: chat})
+
+	// Check if this chat had an unapplied referee referral bonus
+	if ref, err := b.d.Store.Q.GetReferralByReferee(ctx, chat); err == nil && ref.BonusApplied != 0 && ref.RefereeBonusApplied == 0 && ref.RefereeRewardDays > 0 {
+		if b.d.Users != nil {
+			_, _ = b.d.Users.Extend(ctx, userID, ref.RefereeRewardDays)
+			_, _ = b.d.Store.Q.MarkRefereeBonusApplied(ctx, chat)
+			msg := fmt.Sprintf("🎁 <b>Реферальный бонус активирован!</b>\n\nВам начислено <b>+%d дн.</b> к подключённой подписке за переход по приглашению друга.", ref.RefereeRewardDays)
+			out.Notice(chat, func(ctx context.Context, c *Client) error {
+				_, err := c.Send(ctx, chat, msg, nil, false)
+				return err
+			}, nil)
+		}
+	}
+
 	return fmt.Sprintf(w.linked, u.Name)
 }
 

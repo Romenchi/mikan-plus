@@ -364,11 +364,13 @@ type UserPool struct {
 }
 
 type TgReferral struct {
-	ID           int64
-	ReferrerTgID int64
-	RefereeTgID  int64
-	BonusApplied int64
-	RewardDays   int64
-	CreatedAt    int64
-	AppliedAt    int64
+	ID                  int64
+	ReferrerTgID        int64
+	RefereeTgID         int64
+	BonusApplied        int64
+	RewardDays          int64
+	RefereeRewardDays   int64
+	RefereeBonusApplied int64
+	CreatedAt           int64
+	AppliedAt           int64
 }

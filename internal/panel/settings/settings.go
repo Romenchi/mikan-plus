@@ -47,6 +47,8 @@ const (
 	KeySupportURL = "support_url"
 	// KeyQuietHour is the UTC hour the slot pool is refilled, which reconnects QUIC clients.
 	KeyQuietHour = "quiet_hour_utc"
+	// KeyUpdateRepo is the GitHub repo to check updates from (e.g. Romenchi/mikan-plus or getmikan/mikan).
+	KeyUpdateRepo = "update_repo"
 )
 
 // Switch is an on/off setting with its default: read it with On, so the default lives

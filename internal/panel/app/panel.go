@@ -191,6 +191,9 @@ func NewPanel(st *store.Store, o Options) (*Panel, error) {
 	deps.Telegram = p.Telegram
 	p.Billing.SetTelegram(p.Telegram)
 	p.Updates = updates.New(o.DataDir, o.Version, o.Releases, o.Log, o.Now)
+	if repo, err := set.String(context.Background(), settings.KeyUpdateRepo); err == nil && repo != "" {
+		p.Updates.SetSource(updates.FetchFor(repo))
+	}
 	deps.Updates = p.Updates
 	deps.Warp = warp.Client{API: o.WarpAPI}
 	apiHandler, _, err := api.New(deps)

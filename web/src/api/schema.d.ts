@@ -1700,7 +1700,7 @@ export interface components {
         };
         MenuButton: {
             /** @enum {string} */
-            action: "sub" | "devices" | "connect" | "renew" | "support" | "app" | "url" | "page";
+            action: "sub" | "devices" | "connect" | "renew" | "support" | "app" | "url" | "page" | "ref";
             /** @description Постоянный id кнопки */
             id: string;
             label: string;

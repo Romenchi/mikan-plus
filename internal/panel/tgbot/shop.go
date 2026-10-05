@@ -282,17 +282,23 @@ func (b *Bot) checkReferralPayment(ctx context.Context, out *Outbox, refereeTgID
 	if err != nil || ref.BonusApplied != 0 {
 		return
 	}
-	days := int64(cfg.Referrals.ReferrerDays)
-	if days <= 0 {
-		days = 7
+	referrerDays := int64(cfg.Referrals.ReferrerDays)
+	if referrerDays <= 0 {
+		referrerDays = 3
+	}
+	refereeDays := int64(cfg.Referrals.RefereeDays)
+	if refereeDays <= 0 {
+		refereeDays = 2
 	}
 	affected, err := b.d.Store.Q.ApplyReferralReward(ctx, db.ApplyReferralRewardParams{
-		RewardDays:  days,
-		AppliedAt:   b.d.Now().Unix(),
-		RefereeTgID: refereeTgID,
+		RewardDays:        referrerDays,
+		RefereeRewardDays: refereeDays,
+		AppliedAt:         b.d.Now().Unix(),
+		RefereeTgID:       refereeTgID,
 	})
 	if err != nil || affected == 0 {
 		return
 	}
-	b.applyReferrerReward(ctx, out, ref.ReferrerTgID, days)
+	b.applyReferrerReward(ctx, out, ref.ReferrerTgID, referrerDays)
+	b.applyRefereeReward(ctx, out, refereeTgID, refereeDays)
 }

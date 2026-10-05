@@ -24,13 +24,15 @@ type UpdatesView struct {
 	Auto        bool                `json:"auto" doc:"Сервер сам ставит новые релизы раз в сутки, ночью"`
 	RequestedAt int64               `json:"requested_at" doc:"Когда нажали «Обновить»; 0 — заявки нет или сервер её уже взял"`
 	Host        *updates.HostStatus `json:"host,omitempty" doc:"Как прошло последнее обновление на сервере"`
+	Repo        string              `json:"repo" doc:"Репозиторий GitHub для обновлений"`
 }
 
 type updatesOutput struct{ Body UpdatesView }
 
 type patchUpdatesInput struct {
 	Body struct {
-		Auto *bool `json:"auto,omitempty"`
+		Auto *bool   `json:"auto,omitempty"`
+		Repo *string `json:"repo,omitempty" doc:"Репозиторий GitHub для обновлений (owner/repo)"`
 	}
 }
 
@@ -51,6 +53,11 @@ func (h *handlers) updatesView(ctx context.Context) (UpdatesView, error) {
 	if v.Auto, err = h.d.Settings.On(ctx, settings.AutoUpdate); err != nil {
 		return v, err
 	}
+	repo, err := h.d.Settings.String(ctx, settings.KeyUpdateRepo)
+	if err != nil || repo == "" {
+		repo = release.Repo
+	}
+	v.Repo = repo
 	u := h.d.Updates
 	if u == nil {
 		return v, nil
@@ -97,6 +104,21 @@ func (h *handlers) patchUpdates(ctx context.Context, in *patchUpdatesInput) (*up
 		if err := settings.Set(ctx, h.d.Settings, settings.KeyAutoUpdate, *in.Body.Auto); err != nil {
 			return nil, err
 		}
+	}
+	if in.Body.Repo != nil {
+		repo := strings.TrimSpace(*in.Body.Repo)
+		if repo == "" {
+			repo = release.Repo
+		}
+		if err := settings.Set(ctx, h.d.Settings, settings.KeyUpdateRepo, repo); err != nil {
+			return nil, err
+		}
+		if h.d.Updates != nil {
+			h.d.Updates.SetSource(updates.FetchFor(repo))
+			go h.d.Updates.Check(context.Background())
+		h.audit(ctx, sessionOf(ctx).AdminID, "updates.repo", "", "", map[string]any{"repo": repo})
+	}
+	if in.Body.Auto != nil {
 		h.audit(ctx, sessionOf(ctx).AdminID, "updates.auto", "", "", map[string]any{"auto": *in.Body.Auto})
 	}
 	return h.getUpdates(ctx, nil)

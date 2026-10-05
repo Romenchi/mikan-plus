@@ -50,6 +50,23 @@ func Fetch(url string) Source {
 	return fetch(url, pub)
 }
 
+// FetchFor returns a Source that checks releases from repo (e.g. "Romenchi/mikan-plus", "getmikan/mikan").
+func FetchFor(repo string) Source {
+	if repo == "" {
+		repo = release.Repo
+	}
+	url := release.LatestURL(repo)
+	keyStr := release.PublicKey
+	if strings.EqualFold(repo, "getmikan/mikan") || strings.EqualFold(repo, "miroshka000/mikan") {
+		keyStr = release.UpstreamPublicKey
+	}
+	pub, err := release.Key(keyStr)
+	if err != nil {
+		panic(err)
+	}
+	return fetch(url, pub)
+}
+
 func fetch(url string, pub ed25519.PublicKey) Source {
 	client := &http.Client{Timeout: 30 * time.Second}
 	get := func(ctx context.Context, u string, limit int64) ([]byte, error) {
@@ -142,6 +159,15 @@ func (c *Checker) Run(ctx context.Context) {
 			t.Reset(next)
 		}
 	}
+}
+
+// SetSource changes the source repository for release checks.
+func (c *Checker) SetSource(s Source) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.source = s
+	c.latest = nil
+	c.err = ""
 }
 
 // Check asks for the newest release now.

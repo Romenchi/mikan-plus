@@ -81,7 +81,7 @@ func Default(lang string) Config {
 			{ID: "devices", Action: "devices", Label: l("📱 Устройства", "📱 Devices"), On: true, Row: true},
 			{ID: "connect", Action: "connect", Label: l("🔌 Подключить устройство", "🔌 Connect a device"), On: true},
 			{ID: "renew", Action: "renew", Label: l("💳 Продлить", "💳 Renew"), On: true},
-			{ID: "ref", Action: "ref", Label: l("🤝 Пригласить друга", "🤝 Invite a friend"), On: false},
+			{ID: "ref", Action: "ref", Label: l("🤝 Рефералы", "🤝 Referrals"), On: true},
 			{ID: "support", Action: "support", Label: l("💬 Поддержка", "💬 Support"), On: true, Row: true},
 			{ID: "app", Action: "app", Label: l("🌐 Открыть страницу подписки", "🌐 Open the subscription page"), On: true},
 		},
@@ -90,10 +90,10 @@ func Default(lang string) Config {
 		CleanChat:  true,
 		QuietNight: true,
 		Referrals: ReferralConfig{
-			Enabled:      false,
+			Enabled:      true,
 			Trigger:      "on_payment",
-			ReferrerDays: 7,
-			RefereeDays:  3,
+			ReferrerDays: 3,
+			RefereeDays:  2,
 		},
 	}
 }
@@ -163,6 +163,15 @@ func (c *Config) Validate() error {
 		if utf8.RuneCountInString(t) > maxText {
 			return ErrText
 		}
+	}
+	if c.Referrals.ReferrerDays <= 0 {
+		c.Referrals.ReferrerDays = 3
+	}
+	if c.Referrals.RefereeDays < 0 {
+		c.Referrals.RefereeDays = 2
+	}
+	if c.Referrals.Trigger == "" {
+		c.Referrals.Trigger = "on_payment"
 	}
 	return nil
 }

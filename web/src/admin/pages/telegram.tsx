@@ -438,9 +438,10 @@ function RouteCard({ v }: { v: View }) {
   );
 }
 
-const ACTIONS = ["sub", "devices", "connect", "renew", "support", "app"] as const;
+const ACTIONS = ["sub", "devices", "connect", "renew", "ref", "support", "app"] as const;
 
 function actionLabel(a: string): string {
+  if (a === "ref") return "Рефералы";
   return tMaybe(`telegram.action.${a}`) ?? a;
 }
 
@@ -596,16 +597,34 @@ function OptionsCard({ draft, setDraft, v }: { draft: Config; setDraft: (c: Conf
 
 function ReferralCard({ draft, setDraft }: { draft: Config; setDraft: (c: Config) => void }) {
   const ref = draft.referrals ?? {
-    enabled: false,
+    enabled: true,
     trigger: "on_payment",
-    referrer_days: 7,
-    referee_days: 3,
+    referrer_days: 3,
+    referee_days: 2,
   };
 
   const updateRef = (patch: Partial<typeof ref>) => {
+    const nextRef = { ...ref, ...patch };
+    let buttons = draft.buttons;
+    if ("enabled" in patch) {
+      const exists = buttons.some((b) => b.action === "ref");
+      if (patch.enabled) {
+        if (exists) {
+          buttons = buttons.map((b) => (b.action === "ref" ? { ...b, on: true } : b));
+        } else {
+          buttons = [
+            ...buttons,
+            { id: "ref", action: "ref", label: "🤝 Рефералы", on: true, row: false },
+          ];
+        }
+      } else {
+        buttons = buttons.map((b) => (b.action === "ref" ? { ...b, on: false } : b));
+      }
+    }
     setDraft({
       ...draft,
-      referrals: { ...ref, ...patch },
+      buttons,
+      referrals: nextRef,
     });
   };
 

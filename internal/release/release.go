@@ -19,6 +19,9 @@ import (
 // PublicKey is the public half of the release signing key (raw Ed25519, base64).
 const PublicKey = "JCEgib4sIDFPGePPBk4B+zmKwlnpLNoZ8i7vmrJipPo="
 
+// UpstreamPublicKey is the public half of official getmikan/mikan signing key.
+const UpstreamPublicKey = "Z3wSIPBSaJxh5CsGO8eINI0aM0kyrQ46EcJSNeH85W8="
+
 // Repo is where releases are published.
 const Repo = "Romenchi/mikan-plus"
 
@@ -28,8 +31,13 @@ const InstallCommand = "curl -fsSL https://github.com/" + Repo + "/releases/late
 // JoinCommand installs a node of an existing panel with the join key the panel issued.
 func JoinCommand(key string) string { return InstallCommand + " -s -- --join " + key }
 
-// LatestURL is the manifest of the newest release; its signature is LatestURL + ".sig".
-const LatestURL = "https://github.com/" + Repo + "/releases/latest/download/manifest.json"
+// LatestURL returns the manifest URL of repo (defaults to Repo).
+func LatestURL(repo string) string {
+	if repo == "" {
+		repo = Repo
+	}
+	return "https://github.com/" + repo + "/releases/latest/download/manifest.json"
+}
 
 type Manifest struct {
 	Version   string            `json:"version"`

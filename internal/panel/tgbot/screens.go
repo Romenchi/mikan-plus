@@ -37,6 +37,7 @@ func (b *Bot) screen(ctx context.Context, cfg Config, chat int64, data, notice s
 			id, _, _ := strings.Cut(arg, ":")
 			return b.shopInvoice(ctx, w, chat, 0, arg, []Button{{Text: w.back, CallbackData: "tn:" + id}})
 		}
+	}
 	if cmd == "ref" {
 		return b.referralScreen(ctx, cfg, w, chat, notice)
 	}
@@ -129,6 +130,9 @@ func (b *Bot) welcome(ctx context.Context, cfg Config, w *words, notice string) 
 	var rows [][]Button
 	if b.canBuyNew(ctx) {
 		rows = append(rows, []Button{{Text: w.buy, CallbackData: "b"}})
+	}
+	if cfg.Referrals.Enabled {
+		rows = append(rows, []Button{{Text: labelOf(cfg, "ref", pick(cfg.Lang == "en", "🤝 Referrals", "🤝 Реферальная программа")), CallbackData: "ref"}})
 	}
 	if sup := b.supportURL(ctx); sup != "" {
 		rows = append(rows, []Button{{Text: labelOf(cfg, "support", w.support), URL: sup}})
@@ -418,6 +422,22 @@ func (b *Bot) referralScreen(ctx context.Context, cfg Config, w *words, chat int
 	count, _ := b.d.Store.Q.CountReferrals(ctx, chat)
 	days, _ := b.d.Store.Q.SumReferralDays(ctx, chat)
 
+	referrerBonus := cfg.Referrals.ReferrerDays
+	if referrerBonus <= 0 {
+		referrerBonus = 3
+	}
+	refereeBonus := cfg.Referrals.RefereeDays
+	if refereeBonus <= 0 {
+		refereeBonus = 2
+	}
+
+	var condition string
+	if cfg.Referrals.Trigger == "on_start" {
+		condition = pick(cfg.Lang == "en", "credited immediately upon joining", "начисляется сразу при переходе по ссылке")
+	} else {
+		condition = pick(cfg.Lang == "en", "credited after friend's first payment", "начисляется после первой оплаты друга")
+	}
+
 	var sb strings.Builder
 	if notice != "" {
 		sb.WriteString(html.EscapeString(notice) + "\n\n")
@@ -425,6 +445,9 @@ func (b *Bot) referralScreen(ctx context.Context, cfg Config, w *words, chat int
 	if cfg.Lang == "en" {
 		sb.WriteString("🤝 <b>Referral Program</b>\n\n")
 		sb.WriteString("Invite friends and earn bonus days for your subscription!\n\n")
+		sb.WriteString(fmt.Sprintf("• <b>+%d days</b> for you for each invited friend\n", referrerBonus))
+		sb.WriteString(fmt.Sprintf("• <b>+%d days</b> bonus for your invited friend\n", refereeBonus))
+		sb.WriteString(fmt.Sprintf("ℹ️ <i>Bonus condition: %s</i>\n\n", condition))
 		sb.WriteString("🔗 <b>Your invite link:</b>\n")
 		sb.WriteString("<code>" + refURL + "</code>\n\n")
 		sb.WriteString("📊 <b>Your stats:</b>\n")
@@ -433,6 +456,9 @@ func (b *Bot) referralScreen(ctx context.Context, cfg Config, w *words, chat int
 	} else {
 		sb.WriteString("🤝 <b>Реферальная программа</b>\n\n")
 		sb.WriteString("Приглашайте друзей и получайте бонусные дни к вашей подписке!\n\n")
+		sb.WriteString(fmt.Sprintf("• <b>+%d дн.</b> вам за каждого приглашённого друга\n", referrerBonus))
+		sb.WriteString(fmt.Sprintf("• <b>+%d дн.</b> в подарок вашему другу\n", refereeBonus))
+		sb.WriteString(fmt.Sprintf("ℹ️ <i>Условие: %s</i>\n\n", condition))
 		sb.WriteString("🔗 <b>Ваша ссылка для приглашения:</b>\n")
 		sb.WriteString("<code>" + refURL + "</code>\n\n")
 		sb.WriteString("📊 <b>Ваша статистика:</b>\n")
@@ -440,9 +466,9 @@ func (b *Bot) referralScreen(ctx context.Context, cfg Config, w *words, chat int
 		sb.WriteString(fmt.Sprintf("• Получено бонусов: <b>+%d дн.</b>", days))
 	}
 
-	shareText := "Попробуй быстрый и надежный VPN HeyCat с защитой от блокировок!"
+	shareText := fmt.Sprintf("Держи быстрый VPN HeyCat! Подключайся по ссылке и получи +%d дня бонусом к подписке: %s", refereeBonus, refURL)
 	if cfg.Lang == "en" {
-		shareText = "Try HeyCat VPN - fast and secure VPN with anti-censorship!"
+		shareText = fmt.Sprintf("Try fast HeyCat VPN! Connect via my link and get +%d bonus days: %s", refereeBonus, refURL)
 	}
 	shareURL := fmt.Sprintf("https://t.me/share/url?url=%s&text=%s", url.QueryEscape(refURL), url.QueryEscape(shareText))
 

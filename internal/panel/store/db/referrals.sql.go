@@ -21,7 +21,7 @@ func (q *Queries) RecordReferral(ctx context.Context, arg RecordReferralParams) 
 }
 
 const getReferralByReferee = `-- name: GetReferralByReferee :one
-SELECT id, referrer_tg_id, referee_tg_id, bonus_applied, reward_days, created_at, applied_at
+SELECT id, referrer_tg_id, referee_tg_id, bonus_applied, reward_days, referee_reward_days, referee_bonus_applied, created_at, applied_at
 FROM tg_referrals
 WHERE referee_tg_id = ?
 `
@@ -35,6 +35,8 @@ func (q *Queries) GetReferralByReferee(ctx context.Context, refereeTgID int64) (
 		&i.RefereeTgID,
 		&i.BonusApplied,
 		&i.RewardDays,
+		&i.RefereeRewardDays,
+		&i.RefereeBonusApplied,
 		&i.CreatedAt,
 		&i.AppliedAt,
 	)
@@ -43,18 +45,33 @@ func (q *Queries) GetReferralByReferee(ctx context.Context, refereeTgID int64) (
 
 const applyReferralReward = `-- name: ApplyReferralReward :execrows
 UPDATE tg_referrals
-SET bonus_applied = 1, reward_days = ?, applied_at = ?
+SET bonus_applied = 1, reward_days = ?, referee_reward_days = ?, applied_at = ?
 WHERE referee_tg_id = ? AND bonus_applied = 0
 `
 
 type ApplyReferralRewardParams struct {
-	RewardDays  int64
-	AppliedAt   int64
-	RefereeTgID int64
+	RewardDays        int64
+	RefereeRewardDays int64
+	AppliedAt         int64
+	RefereeTgID       int64
 }
 
 func (q *Queries) ApplyReferralReward(ctx context.Context, arg ApplyReferralRewardParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, applyReferralReward, arg.RewardDays, arg.AppliedAt, arg.RefereeTgID)
+	result, err := q.db.ExecContext(ctx, applyReferralReward, arg.RewardDays, arg.RefereeRewardDays, arg.AppliedAt, arg.RefereeTgID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const markRefereeBonusApplied = `-- name: MarkRefereeBonusApplied :execrows
+UPDATE tg_referrals
+SET referee_bonus_applied = 1
+WHERE referee_tg_id = ? AND referee_bonus_applied = 0
+`
+
+func (q *Queries) MarkRefereeBonusApplied(ctx context.Context, refereeTgID int64) (int64, error) {
+	result, err := q.db.ExecContext(ctx, markRefereeBonusApplied, refereeTgID)
 	if err != nil {
 		return 0, err
 	}
@@ -84,7 +101,7 @@ func (q *Queries) SumReferralDays(ctx context.Context, referrerTgID int64) (int6
 }
 
 const listReferralsOf = `-- name: ListReferralsOf :many
-SELECT r.id, r.referrer_tg_id, r.referee_tg_id, r.bonus_applied, r.reward_days, r.created_at, r.applied_at,
+SELECT r.id, r.referrer_tg_id, r.referee_tg_id, r.bonus_applied, r.reward_days, r.referee_reward_days, r.referee_bonus_applied, r.created_at, r.applied_at,
        COALESCE(c.username, '') AS referee_username, COALESCE(c.first_name, '') AS referee_first_name
 FROM tg_referrals r
 LEFT JOIN tg_chats c ON c.tg_id = r.referee_tg_id
@@ -94,15 +111,17 @@ LIMIT 50
 `
 
 type ListReferralsOfRow struct {
-	ID               int64
-	ReferrerTgID     int64
-	RefereeTgID      int64
-	BonusApplied     int64
-	RewardDays       int64
-	CreatedAt        int64
-	AppliedAt        int64
-	RefereeUsername  string
-	RefereeFirstName string
+	ID                  int64
+	ReferrerTgID        int64
+	RefereeTgID         int64
+	BonusApplied        int64
+	RewardDays          int64
+	RefereeRewardDays   int64
+	RefereeBonusApplied int64
+	CreatedAt           int64
+	AppliedAt           int64
+	RefereeUsername     string
+	RefereeFirstName    string
 }
 
 func (q *Queries) ListReferralsOf(ctx context.Context, referrerTgID int64) ([]ListReferralsOfRow, error) {
@@ -120,6 +139,8 @@ func (q *Queries) ListReferralsOf(ctx context.Context, referrerTgID int64) ([]Li
 			&i.RefereeTgID,
 			&i.BonusApplied,
 			&i.RewardDays,
+			&i.RefereeRewardDays,
+			&i.RefereeBonusApplied,
 			&i.CreatedAt,
 			&i.AppliedAt,
 			&i.RefereeUsername,
